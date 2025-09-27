@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>RPG 2025 — Room States (per-room keys)</title>
+<style>
+  :root { --bg:#0b0e14; --panel:#08120c; --fg:#d3f2db; --mut:#8ab69a }
+  html,body{height:100%}
+  body{margin:0;background:#000;color:var(--fg);font:14px/1.4 ui-monospace,Menlo,Consolas,monospace;
+       display:grid;grid-template-columns:320px 1fr;grid-template-rows:auto 1fr;grid-template-areas:"controls stage" "controls stage"}
+  #controls{grid-area:controls;padding:10px;background:var(--panel);border-right:1px solid #163121;overflow:auto}
+  #stage{grid-area:stage;display:flex;align-items:center;justify-content:center;background:#000;overflow:hidden}
+  #mapHost{width:100%;max-width:1200px;aspect-ratio:4/3;background:#010a06;border:1px solid #123220;
+           display:flex;align-items:center;justify-content:center;overflow:hidden}
+  svg{width:100%;height:auto}
+  h1{margin:0 0 8px;font-size:14px}
+  .sec{border:1px dashed #1e4b33;padding:8px;margin:8px 0;border-radius:6px;background:#06130b}
+  .row{display:grid;gap:6px}
+  input,button{padding:8px;border-radius:6px;border:1px solid #1b3a2a;background:#0e2415;color:#eaffed}
+  button{cursor:pointer} button:hover{filter:brightness(1.08)}
+  #status{font-size:12px;color:var(--mut)}
+  .fire-on   path,.fire-on   rect,.fire-on   polygon,.fire-on   polyline,.fire-on   circle,.fire-on   ellipse{stroke:#ff2b2b!important;stroke-width:8!important;fill-opacity:1}
+  .breach-on path,.breach-on rect,.breach-on polygon,.breach-on polyline,.breach-on circle,.breach-on ellipse{stroke:#5d3fd3!important;stroke-width:8!important;fill-opacity:1}
+</style>
+</head>
+<body>
+  <aside id="controls">
+    <h1>RPG 2025 — Room States</h1>
+
+    <div class="sec">
+      <strong>Load SVG</strong>
+      <div class="row">
+        <input id="filePick" type="file" accept="image/svg+xml" />
+        <button id="demoBtn" type="button">Load demo</button>
+      </div>
+    </div>
+
+    <div class="sec">
+      <strong>Webdis</strong>
+      <div class="row">
+        <input id="wdUrl" placeholder="http://192.168.30.114:7379" />
+        <input id="prefix" placeholder="rpg2025_room_" />
+        <div style="display:flex;gap:6px;align-items:center">
+          <input id="interval" type="number" min="1" step="1" value="2" style="width:5em" />
+          <button id="startPoll">Start</button>
+          <button id="stopPoll">Stop</button>
+        </div>
+        <div id="status">idle</div>
+      </div>
+    </div>
+
+    <div class="sec">
+      <strong>Discovered rooms</strong>
+      <pre id="roomsList" style="margin:6px 0;white-space:pre-wrap;color:#bfe7c8;overflow:auto;max-height:180px">—</pre>
+    </div>
+  </aside>
+
+  <div id="stage"><div id="mapHost" aria-busy="true"></div></div>
+
+<script>
+const $filePick = document.getElementById('filePick');
+const $demoBtn  = document.getElementById('demoBtn');
+const $wdUrl    = document.getElementById('wdUrl');
+const $prefix   = document.getElementById('prefix');
+const $interval = document.getElementById('interval');
+const $start    = document.getElementById('startPoll');
+const $stop     = document.getElementById('stopPoll');
+const $status   = document.getElementById('status');
+const $mapHost  = document.getElementById('mapHost');
+const $roomsList= document.getElementById('roomsList');
+
+let timer=null;
+
+function setStatus(msg, lvl){ $status.textContent=msg; $status.style.color = lvl==='ok'?'#9cffb2':lvl==='err'?'#ff8b8b':'#8ab69a'; }
+
+function parseSVG(text){
+  const doc = new DOMParser().parseFromString(text,'image/svg+xml');
+  const svg = doc.querySelector('svg'); if(!svg) throw new Error('Not an SVG');
+  svg.querySelectorAll('script').forEach(s=>s.remove());
+  const g = doc.createElementNS('http://www.w3.org/2000/svg','g');
+  while(svg.firstChild) g.appendChild(svg.firstChild);
+  g.setAttribute('id','__scaleWrapper'); g.setAttribute('transform','scale(0.14)'); svg.appendChild(g);
+  const style = doc.createElementNS('http://www.w3.org/2000/svg','style');
+  style.textContent='.fire-on *, .breach-on * { vector-effect: non-scaling-stroke; }'; svg.appendChild(style);
+  return svg;
+}
+function loadIntoHost(svg){
+  svg.setAttribute('preserveAspectRatio','xMidYMid meet'); svg.style.width='100%'; svg.style.height='auto';
+  $mapHost.innerHTML=''; $mapHost.appendChild(svg);
+}
+
+// URL API helpers
+async function jget(url){
+  const r=await fetch(url,{cache:'no-store'}); if(!r.ok) throw new Error(`HTTP ${r.status}`); return r.json();
+}
+function joinPath(base, parts){ return base.replace(/\/$/,'') + '/' + parts.join('/'); }
+
+// Proper SCAN cursor iteration
+async function scanAll(base, match, count=500){
+  let cursor='0', all=[];
+  do{
+    const url = joinPath(base, ['SCAN', encodeURIComponent(cursor), 'MATCH', encodeURIComponent(match), 'COUNT', String(count)]);
+    const j = await jget(url);
+    const arr = j.SCAN || j.scan;
+    if(!arr || !Array.isArray(arr) || arr.length!==2) break;
+    cursor = arr[0];
+    const ks = arr[1] || [];
+    all.push(...ks);
+  } while(cursor !== '0' && cursor !== 0);
+  return all;
+}
+
+// KEYS fallback for cranky Webdis builds
+async function keysFallback(base, match){
+  const url = joinPath(base, ['KEYS', encodeURIComponent(match)]);
+  const j = await jget(url);
+  let val = j.KEYS || j.keys;
+  if(Array.isArray(val)) return val;
+  if(val && typeof val==='object'){
+    // Some builds return {"KEYS":{"0":"k1","1":"k2",...}}
+    return Object.values(val).filter(v=>typeof v==='string');
+  }
+  return [];
+}
+
+async function getValue(base, key){
+  const url = joinPath(base, ['GET', key]);
+  const j = await jget(url);
+  return j.GET ?? j.get ?? null;
+}
+
+async function discoverKeys(base, prefix){
+  // 1) Try SCAN
+  try{
+    const ks = await scanAll(base, `${prefix}*`);
+    if(ks.length) return ks.sort();
+  }catch(_){}
+  // 2) Fallback KEYS
+  try{
+    const ks = await keysFallback(base, `${prefix}*`);
+    if(ks.length) return ks.sort();
+  }catch(_){}
+  // 3) SVG-derived guess: build keys from <g id$="_Room">
+  const svg = $mapHost.querySelector('svg');
+  if(svg){
+    const ids=[...svg.querySelectorAll('[id$="_Room"]')].map(n=>n.id);
+    return ids.map(id => `${prefix}${id}`);
+  }
+  return [];
+}
+
+async function pollOnce(){
+  const base = $wdUrl.value.trim(); const prefix = $prefix.value.trim();
+  if(!base || !prefix){ setStatus('Missing Webdis URL or prefix','err'); return; }
+
+  try{
+    const keys = await discoverKeys(base, prefix);
+    $roomsList.textContent = keys.length ? keys.join('\n') : '—';
+    const svg = $mapHost.querySelector('svg');
+    if(!svg){ setStatus('No SVG loaded','err'); return; }
+
+    for(const key of keys){
+      const val = await getValue(base, key); // 'ok' | 'fire' | 'breach' | null
+      const roomId = key.slice(prefix.length);
+      const g = svg.getElementById(roomId);
+      if(!g) continue;
+      const breach = (val === 'breach');
+      const fire   = (val === 'fire');
+      g.classList.toggle('breach-on', breach);
+      g.classList.toggle('fire-on', fire && !breach);
+      if(val === 'ok' || val === null){
+        g.classList.remove('breach-on','fire-on');
+      }
+    }
+    setStatus(`OK @ ${new Date().toLocaleTimeString()}`,'ok');
+  }catch(e){
+    setStatus(`Error: ${e.message||e}`,'err');
+  }
+}
+
+function start(){ stop(); const ms=Math.max(1000,(parseInt($interval.value,10)||2)*1000); pollOnce(); timer=setInterval(pollOnce,ms); }
+function stop(){ if(timer) clearInterval(timer); timer=null; }
+
+// Wire
+document.getElementById('startPoll').onclick=start;
+document.getElementById('stopPoll').onclick=stop;
+
+$filePick.addEventListener('change', e=>{
+  const f=e.target.files[0]; if(!f) return;
+  const r=new FileReader(); r.onload=()=>{ try{ loadIntoHost(parseSVG(r.result)); }catch{ setStatus('SVG parse failed','err'); } };
+  r.readAsText(f);
+});
+
+const DEMO = `<?xml version="1.0"?>
+<svg viewBox="0 0 800 600" xmlns="http://www.w3.org/2000/svg">
+  <rect width="800" height="600" fill="#0a0f18"/>
+  <g id="Command_Deck_Room"><rect x="40" y="40" width="200" height="120" fill="#1d2636" stroke="#5a6a8a"/></g>
+  <g id="Medical_Room"><rect x="280" y="40" width="200" height="120" fill="#1d2636" stroke="#5a6a8a"/></g>
+  <g id="Reactor_Core_Room"><rect x="520" y="40" width="240" height="120" fill="#1d2636" stroke="#5a6a8a"/></g>
+  <g id="Recreation_Lounge_Room"><rect x="40" y="200" width="200" height="120" fill="#1d2636" stroke="#5a6a8a"/></g>
+  <g id="Cargo_Bay_Room"><rect x="280" y="200" width="200" height="120" fill="#1d2636" stroke="#5a6a8a"/></g>
+  <g id="Engineering_Room"><rect x="520" y="200" width="240" height="120" fill="#1d2636" stroke="#5a6a8a"/></g>
+  <g id="Primary_Comms_Room"><rect x="40" y="360" width="200" height="120" fill="#1d2636" stroke="#5a6a8a"/></g>
+  <g id="Computer_Core_Room"><rect x="280" y="360" width="200" height="120" fill="#1d2636" stroke="#5a6a8a"/></g>
+  <g id="Armoury_Brig_Room"><rect x="520" y="360" width="240" height="120" fill="#1d2636" stroke="#5a6a8a"/></g>
+  <text x="24" y="24" fill="#a8ffc0" font-family="ui-monospace" font-size="14">DEMO MAP</text>
+</svg>`;
+$demoBtn.addEventListener('click', ()=>{ try{ loadIntoHost(parseSVG(DEMO)); setStatus('Demo map loaded','ok'); }catch(e){ setStatus('Demo load failed','err'); } });
+
+window.addEventListener('DOMContentLoaded', ()=>{
+  $wdUrl.value   = localStorage.getItem('wd:url') || 'http://192.168.30.114:7379';
+  $prefix.value  = localStorage.getItem('wd:prefix') || 'rpg2025_room_';
+  $interval.value= localStorage.getItem('wd:int') || '2';
+  [$wdUrl,$prefix,$interval].forEach(i=>i.addEventListener('change',()=>{
+    localStorage.setItem('wd:url',$wdUrl.value.trim());
+    localStorage.setItem('wd:prefix',$prefix.value.trim());
+    localStorage.setItem('wd:int',$interval.value.trim());
+  }));
+  loadIntoHost(parseSVG(DEMO));
+});
+</script>
+</body>
+</html>

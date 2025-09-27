@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Webdis Explorer (Zero-Patience Edition)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root{--bg:#0b0e14;--fg:#cde7d0;--mut:#82a690;--accent:#7aa2f7;--err:#ff8b8b;}
+  html,body{height:100%}
+  body{margin:0;background:#000;color:var(--fg);font:14px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+       display:grid;grid-template-rows:auto 1fr}
+  header{padding:10px;background:#0b0e14;border-bottom:1px solid #1b2a22;display:grid;gap:8px}
+  .row{display:grid;grid-template-columns:1.2fr .8fr auto auto auto;gap:8px;align-items:center}
+  input,button{padding:8px;border-radius:6px;border:1px solid #1b2a22;background:#0e2415;color:#e6ffe9}
+  button{cursor:pointer}
+  button:hover{filter:brightness(1.1)}
+  #status{font-size:12px;color:var(--mut)}
+  main{display:grid;grid-template-columns:320px 1fr;gap:0;height:100%}
+  aside{border-right:1px solid #1b2a22;background:#07130c;overflow:auto}
+  section{overflow:auto}
+  h2{margin:10px 12px 6px;font-size:13px;color:#9bd0a4}
+  .card{padding:10px;border-bottom:1px solid #0f1d16}
+  .key{font-weight:600;color:#b7f5c0}
+  .meta{font-size:12px;color:#86a494}
+  pre{background:#050e09;border:1px solid #173524;padding:8px;border-radius:6px;color:#aef2bb;overflow:auto}
+  details{margin-top:6px}
+  .err{color:var(--err)}
+  .pill{display:inline-block;border:1px solid #234933;border-radius:999px;padding:2px 6px;margin-left:6px;background:#0e2415;color:#bfeccc;font-size:11px}
+  .toolbar{display:flex;gap:8px;align-items:center;margin:8px 12px}
+  .cmdrow{display:grid;grid-template-columns:1fr auto;gap:8px;margin:8px 12px}
+</style>
+</head>
+<body>
+<header>
+  <div class="row">
+    <input id="url" placeholder="http://192.168.30.114:7379" />
+    <input id="match" placeholder="MATCH pattern (optional), default *" />
+    <button id="scanBtn">Scan all</button>
+    <button id="stopBtn">Stop</button>
+    <div id="status">Idle</div>
+  </div>
+  <div class="cmdrow">
+    <input id="cmdInput" placeholder='Raw command JSON, e.g. {"GET":["rpg2025:rooms"]} or {"SCAN":[0,"MATCH","*", "COUNT",1000]}' />
+    <button id="cmdSend">Send</button>
+  </div>
+</header>
+
+<main>
+  <aside>
+    <h2>Keys</h2>
+    <div class="toolbar">
+      <span id="count">0 keys</span>
+      <span id="curCursor" class="pill">cursor: -</span>
+    </div>
+    <div id="keys"></div>
+  </aside>
+  <section>
+    <h2>Details</h2>
+    <div id="detail"></div>
+  </section>
+</main>
+
+<script>
+const $url = document.getElementById('url');
+const $match = document.getElementById('match');
+const $scanBtn = document.getElementById('scanBtn');
+const $stopBtn = document.getElementById('stopBtn');
+const $status = document.getElementById('status');
+const $keys = document.getElementById('keys');
+const $detail = document.getElementById('detail');
+const $count = document.getElementById('count');
+const $curCursor = document.getElementById('curCursor');
+const $cmdInput = document.getElementById('cmdInput');
+const $cmdSend = document.getElementById('cmdSend');
+
+let stopFlag = false;
+$url.value = localStorage.getItem('webdis:url') || 'http://192.168.30.114:7379';
+
+function setStatus(msg, level='info'){
+  $status.textContent = msg;
+  $status.style.color = level === 'err' ? '#ff8b8b' : level === 'ok' ? '#9cffb2' : '#82a690';
+}
+
+async function postJSON(url, obj){
+  const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(obj)});
+  if(!r.ok) throw new Error(`HTTP ${r.status}`);
+  return await r.json();
+}
+async function getJSON(url){
+  const r = await fetch(url, {cache:'no-store'});
+  if(!r.ok) throw new Error(`HTTP ${r.status}`);
+  return await r.json();
+}
+
+function unwrap(resp, keyUpper){
+  // Webdis returns {CMD: value} or lowercase depending on build
+  return resp[keyUpper] ?? resp[keyUpper.toLowerCase()] ?? null;
+}
+
+function looksJSON(s){
+  return typeof s === 'string' && s.length > 1 && ((s[0]==='{' && s.at(-1)==='}') || (s[0]==='[' && s.at(-1)===']'));
+}
+
+function renderValue(key, type, rawVal){
+  const card = document.createElement('div');
+  card.className = 'card';
+  const pretty = document.createElement('div');
+  pretty.innerHTML = `<div class="key">${key}</div><div class="meta">type=${type}</div>`;
+  card.appendChild(pretty);
+
+  const pre = document.createElement('pre');
+  let val = rawVal;
+  // If Webdis wrapped strings (e.g. GET returns JSON string), try to parse
+  if(typeof val === 'string' && looksJSON(val)){
+    try { val = JSON.parse(val); } catch {}
+  }
+  pre.textContent = (typeof val === 'object') ? JSON.stringify(val, null, 2) : String(val);
+  card.appendChild(pre);
+  return card;
+}
+
+async function fetchKeyDetail(base, key){
+  // TYPE
+  let typeResp = await getJSON(`${base}/TYPE/${encodeURIComponent(key)}`);
+  let type = unwrap(typeResp, 'TYPE') || 'unknown';
+
+  try {
+    if(type === 'string'){
+      const r = await getJSON(`${base}/GET/${encodeURIComponent(key)}`);
+      return renderValue(key, type, unwrap(r,'GET'));
+    } else if(type === 'hash'){
+      const r = await getJSON(`${base}/HGETALL/${encodeURIComponent(key)}`);
+      return renderValue(key, type, unwrap(r,'HGETALL'));
+    } else if(type === 'list'){
+      const r = await getJSON(`${base}/LRANGE/${encodeURIComponent(key)}/0/-1`);
+      return renderValue(key, type, unwrap(r,'LRANGE'));
+    } else if(type === 'set'){
+      const r = await getJSON(`${base}/SMEMBERS/${encodeURIComponent(key)}`);
+      return renderValue(key, type, unwrap(r,'SMEMBERS'));
+    } else if(type === 'zset'){
+      const r = await getJSON(`${base}/ZRANGE/${encodeURIComponent(key)}/0/-1/WITHSCORES`);
+      return renderValue(key, type, unwrap(r,'ZRANGE'));
+    } else {
+      // try GET anyway
+      const r = await getJSON(`${base}/GET/${encodeURIComponent(key)}`);
+      return renderValue(key, type, unwrap(r,'GET'));
+    }
+  } catch(e){
+    const card = document.createElement('div');
+    card.className='card';
+    card.innerHTML = `<div class="key">${key}</div><div class="meta">type=${type}</div><div class="err">Error fetching value: ${e}</div>`;
+    return card;
+  }
+}
+
+function addKeyItem(key, onClick){
+  const div=document.createElement('div');
+  div.className='card';
+  div.innerHTML = `<div class="key">${key}</div>`;
+  div.onclick=onClick;
+  $keys.appendChild(div);
+}
+
+async function scanAll(){
+  stopFlag = false;
+  const base = $url.value.trim().replace(/\/$/,'');
+  localStorage.setItem('webdis:url', base);
+  $keys.innerHTML = '';
+  $detail.innerHTML = '';
+  $count.textContent = '0 keys';
+  $curCursor.textContent = 'cursor: -';
+
+  let cursor = 0;
+  const match = ($match.value.trim() || '*');
+  let total=0;
+
+  try{
+    do{
+      if(stopFlag){ setStatus('Stopped','warn'); return; }
+      setStatus(`Scanning… cursor ${cursor}`);
+      // Prefer POST JSON SCAN with MATCH and COUNT to be explicit
+      const payload = {"SCAN":[cursor, "MATCH", match, "COUNT", 1000]};
+      const resp = await postJSON(base, payload);
+      const arr = unwrap(resp, 'SCAN');
+      // SCAN returns [new_cursor, [keys...]]
+      let next = 0, keys=[];
+      if(Array.isArray(arr) && arr.length===2){
+        next = typeof arr[0]==='string' ? parseInt(arr[0],10) : arr[0];
+        keys = arr[1] || [];
+      } else {
+        // fallback GET style: /SCAN/0 returns {SCAN:["cursor",["keys"]]}
+        const val = Array.isArray(arr) ? arr : [];
+        next = typeof val[0]==='string' ? parseInt(val[0],10) : (val[0]||0);
+        keys = val[1] || [];
+      }
+
+      // Render keys and wire click to load details
+      for(const k of keys){
+        addKeyItem(k, async ()=>{
+          $detail.innerHTML = '';
+          $detail.appendChild(await fetchKeyDetail(base, k));
+        });
+      }
+      total += keys.length;
+      $count.textContent = `${total} keys`;
+      $curCursor.textContent = `cursor: ${next}`;
+      cursor = next;
+    } while(cursor !== 0);
+
+    setStatus(`Done. ${total} keys total.`, 'ok');
+  } catch(e){
+    setStatus(`Error: ${e}`, 'err');
+  }
+}
+
+$scanBtn.onclick = scanAll;
+$stopBtn.onclick = ()=>{ stopFlag = true; };
+$cmdSend.onclick = async ()=>{
+  const base = $url.value.trim().replace(/\/$/,'');
+  try{
+    const obj = JSON.parse($cmdInput.value);
+    const out = await postJSON(base, obj);
+    $detail.innerHTML = '';
+    const pre = document.createElement('pre');
+    pre.textContent = JSON.stringify(out, null, 2);
+    $detail.appendChild(pre);
+    setStatus('Command OK','ok');
+  }catch(e){
+    setStatus(`Cmd error: ${e}`, 'err');
+  }
+};
+
+// Quality of life: auto-scan on load
+window.addEventListener('DOMContentLoaded', ()=>{
+  if($url.value) scanAll();
+});
+</script>
+</body>
+</html>
