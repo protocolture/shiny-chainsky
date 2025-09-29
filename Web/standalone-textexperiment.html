@@ -101,7 +101,7 @@ main.scanlines{width:min(100vw,1200px); aspect-ratio:4/3;}
 
 /* AV text + menu */
 .bottomtext{
-  position:absolute; left:5%; bottom:8%; width:200px; color:var(--crt-green);
+  position:absolute; left:5%; top:80%; width:200px; color:var(--crt-green);
   font-family:Sys; font-size:6vmin; text-shadow:0 0 3px var(--crt-green);
   filter:blur(.5px); opacity:0; pointer-events:none;
 }
@@ -135,6 +135,8 @@ main.scanlines{width:min(100vw,1200px); aspect-ratio:4/3;}
 .on  canvas#noise{ animation: on 3000ms linear forwards; }
 .off canvas#noise{ animation: off 750ms cubic-bezier(.23,1,.32,1) forwards; }
 .on  .text, .on .menu{ opacity:1; transition:opacity 150ms ease 2000ms; }
+.on  .bottomtext, .on .menu{ opacity:1; transition:opacity 150ms ease 2000ms; }
+.on  .svgtext, .on .menu{ opacity:1; transition:opacity 150ms ease 2000ms; }
 
 /* keyframes */
 @keyframes on{
@@ -193,7 +195,7 @@ svg .bloom-copy{
   <div class="screen">
     <div class="picture-wrap">
       <canvas id="noise"></canvas>
-      <div id="mapLayer">
+      <div id="mapLayer" class=svgtext>
         <!-- ================== INLINE YOUR SVG MAP HERE ================== -->
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8000 6000" preserveAspectRatio="xMidYMid meet">
           <defs>
