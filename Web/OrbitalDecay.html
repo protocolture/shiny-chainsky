@@ -2,71 +2,71 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Orbit Decay UI (Webdis-driven)</title>
+  <title>Orbit Decay UI (Webdis-driven, plain JS)</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <!-- React 18 (UMD) -->
   <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
-  <!-- Babel Standalone with TS+React presets -->
+  <!-- Babel Standalone (JSX only) -->
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <style>
     html, body { margin: 0; height: 100%; background: #000; }
-    button {
-      background:#111; color:#fff; border:1px solid #333; border-radius:6px; padding:4px 10px; cursor:pointer;
-    }
+    button { background:#111; color:#fff; border:1px solid #333; border-radius:6px; padding:4px 10px; cursor:pointer; }
     button:hover { border-color:#555; }
     input[type="range"] { accent-color:#0ea5e9; }
+    #errbar { position: fixed; top: 0; left: 0; right: 0; background: #7f1d1d; color: #fff; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; padding: 6px 10px; display:none; z-index: 9999; }
   </style>
 </head>
 <body>
+  <div id="errbar"></div>
   <div id="root"></div>
 
-  <script type="text/babel" data-presets="typescript,react">
+  <script>
+    // Show runtime errors on-screen instead of a blank page
+    const errbar = document.getElementById('errbar');
+    window.addEventListener('error', (e) => {
+      errbar.style.display = 'block';
+      errbar.textContent = 'Runtime error: ' + (e.message || e.error);
+      console.error(e.error || e.message, e);
+    });
+    window.addEventListener('unhandledrejection', (e) => {
+      errbar.style.display = 'block';
+      errbar.textContent = 'Unhandled promise rejection: ' + (e.reason && e.reason.message ? e.reason.message : e.reason);
+      console.error(e.reason);
+    });
+  </script>
+
+  <script type="text/babel" data-presets="react">
     const { useEffect, useMemo, useRef, useState } = React;
 
-    /**
-     * Orbit Decay UI — Webdis-driven fallFactor presets + layer flags
-     * - Replaces manual fallFactor slider with 4 presets controlled via Webdis keys
-     *   Phase1, Phase2, Phase3, Phase4 → fallFactor 490 / 365 / 244 / 182
-     *   Highest active phase (numerically largest mapped factor) wins
-     * - Emits layer-crossing flags to Webdis when passed: CloudDeck, Stratosheath, RedZone, Crushdepth
-     * - Keeps prior visuals, 6+ orbit preview, period + ETAs
-     * NOTE: Webdis must include appropriate CORS headers for browser fetch.
-     */
-
     // ===== Webdis config =====
-    const WEBDIS_BASE = "http://192.168.30.114:7379"; // change if needed
-    const PHASE_KEYS = ["Phase1", "Phase2", "Phase3", "Phase4"] as const;
-    const PHASE_MAP: Record<(typeof PHASE_KEYS)[number], number> = {
-      Phase1: 490,
-      Phase2: 365,
-      Phase3: 244,
-      Phase4: 182,
-    };
+    const WEBDIS_BASE = "http://192.168.30.114:7379"; // your server
+    const PHASE_KEYS = ["Phase1", "Phase2", "Phase3", "Phase4"];
+    const PHASE_MAP = { Phase1: 490, Phase2: 365, Phase3: 244, Phase4: 182 };
 
     function createOrbitState() {
       return { r: 145, v: 1.0, theta: 0, mu: 1.0, Cd: 2.2, A: 1.0, m: 1.0 };
     }
 
-    function atmosphericDensity(r: number) {
+    function atmosphericDensity(r) {
       const h = Math.max(0, r - 40);
       if (h > 100) return 0.0001 * Math.exp(-(h - 100) / 50);
-      if (h > 60) return 0.001 * Math.exp(-(h - 60) / 20);
+      if (h > 60)  return 0.001  * Math.exp(-(h - 60) / 20);
       return 0.01 * Math.exp(-(h - 40) / 5);
     }
 
-    function stepOrbit(state: any, dt: number, velocityBoost: number) {
+    function stepOrbit(state, dt, velocityBoost) {
       const rho = atmosphericDensity(state.r);
       const dragAccel = 0.5 * state.Cd * (state.A / state.m) * rho * state.v * state.v * velocityBoost;
       const gravityAccel = state.mu / (state.r * state.r);
       const inwardAccel = dragAccel + gravityAccel;
 
-      // simplified tangential evolution (gravity adds, drag removes)
+      // tangential (gravity adds, drag removes)
       state.v += (gravityAccel - dragAccel) * dt;
       if (state.v > 10) state.v = 10;
       if (state.v < 0.1) state.v = 0.1;
 
-      // radial decay (inward) proportional to inwardAccel and current speed
+      // radial decay (inward)
       state.r -= inwardAccel * dt * state.v * 0.5;
       if (state.r < 40) state.r = 40;
 
@@ -83,8 +83,8 @@
       const [simRate, setSimRate] = useState(1);
       const [speedSetpoint, setSpeedSetpoint] = useState(1.0);
       const [view, setView] = useState(1);
-      const [webdisOk, setWebdisOk] = useState<boolean | null>(null);
-      const [activePhase, setActivePhase] = useState<string>("Phase4");
+      const [webdisOk, setWebdisOk] = useState(null);
+      const [activePhase, setActivePhase] = useState("Phase4");
 
       // Webhook + ETA state (retained)
       const [webhookUrl, setWebhookUrl] = useState("");
@@ -92,7 +92,7 @@
       const lastTriggerKeyRef = useRef("");
 
       // Layer flag send guard
-      const sentLayerFlagsRef = useRef<Record<string, boolean>>({});
+      const sentLayerFlagsRef = useRef({});
 
       // ===== Layers =====
       const layers = useMemo(
@@ -120,9 +120,7 @@
       // ===== Camera / View =====
       const shipBaseX = 250;
       const shipBaseY = 100; // HUD anchor (ship above world)
-      const planetCenter = { x: shipBaseX, y: shipBaseY + orbit.r };
 
-      let shipX = shipBaseX;
       let shipY = shipBaseY;
       let scale = 1;
       let translateY = 0;
@@ -161,13 +159,13 @@
             }
           }
         }
-        if (orbit.r > 40) return { name: "Crushdepth", key: "Crushdepth", r: 40 } as const;
+        if (orbit.r > 40) return { name: "Crushdepth", key: "Crushdepth", r: 40 };
         return null; // already at/below crushdepth
       }, [boundaries, orbit.r]);
 
       // ===== Predict path from ship frame =====
       const fullPath = useMemo(() => {
-        const pts: string[] = [];
+        const pts = [];
         const r0 = orbit.r;
         const th0 = orbit.theta;
         const shipPos = { x: r0 * Math.cos(th0), y: r0 * Math.sin(th0) };
@@ -201,19 +199,19 @@
       // ===== HUD vectors/readouts =====
       const rho = atmosphericDensity(orbit.r);
       const dragAccel = 0.5 * (orbit.Cd * (orbit.A / orbit.m)) * rho * orbit.v * orbit.v * fallFactor;
-      const gravityAccel = fallFactor / (orbit.r * (orbit.r));
+      const gravityAccel = fallFactor / (orbit.r * orbit.r);
       const inwardAccel = dragAccel + gravityAccel;
       const tangentialScale = 20;
       const radialScale = 300;
       const vx = tangentialScale * orbit.v;
       const vy = radialScale * inwardAccel;
 
-      // ===== ETA prediction (simulation seconds & real seconds) =====
+      // ===== ETA prediction =====
       const etaSimSeconds = useMemo(() => {
         if (!nextTarget) return null;
         let s = { ...orbit, mu: fallFactor };
         let t = 0;
-        const dt = 0.05; // sim seconds per prediction step
+        const dt = 0.05;
         let steps = 0;
         const MAX = 200000;
         while (s.r > nextTarget.r && steps++ < MAX) {
@@ -221,7 +219,7 @@
           t += dt;
           if (s.r <= 40) break;
         }
-        if (steps >= MAX) return null; // diverged
+        if (steps >= MAX) return null;
         return t;
       }, [orbit, fallFactor, nextTarget]);
 
@@ -230,11 +228,11 @@
         return etaSimSeconds / Math.max(simRate, 0.0001);
       }, [etaSimSeconds, simRate]);
 
-      // ==== Orbital period (based on angular rate v/r) ====
+      // ==== Orbital period ====
       const orbitalPeriodSimSeconds = useMemo(() => {
-        const angRate = orbit.v / Math.max(orbit.r, 1e-6); // rad/s in sim-time
+        const angRate = orbit.v / Math.max(orbit.r, 1e-6);
         if (angRate <= 0) return null;
-        return (2 * Math.PI) / angRate; // sim seconds per orbit
+        return (2 * Math.PI) / angRate;
       }, [orbit.v, orbit.r]);
 
       const orbitalPeriodRealSeconds = useMemo(() => {
@@ -242,7 +240,7 @@
         return orbitalPeriodSimSeconds / Math.max(simRate, 0.0001);
       }, [orbitalPeriodSimSeconds, simRate]);
 
-      // ==== Time to each boundary (Cloud Deck, Stratosheath, Red Zone, Crushdepth) ====
+      // ==== Time to each boundary ====
       const allBoundaries = useMemo(
         () => [...layers.map((l) => ({ name: l.name, key: l.key, r: l.r })), { name: "Crushdepth", key: "Crushdepth", r: 40 }].sort((a, b) => b.r - a.r),
         [layers]
@@ -251,11 +249,11 @@
       const layerETAs = useMemo(() => {
         return allBoundaries.map((b) => {
           if (orbit.r <= b.r) {
-            return { ...b, status: "Threshold Reached", etaSim: null as number | null, etaReal: null as number | null };
+            return { ...b, status: "Threshold Reached", etaSim: null, etaReal: null };
           }
           let s = { ...orbit, mu: fallFactor };
           let t = 0;
-          const dt = 0.05; // sim seconds per prediction step
+          const dt = 0.05;
           let steps = 0;
           const MAX = 200000;
           while (s.r > b.r && steps++ < MAX) {
@@ -273,9 +271,9 @@
       }, [allBoundaries, orbit, fallFactor, simRate]);
 
       // ===== Webdis helpers =====
-      async function webdisGet(key: string): Promise<string | null> {
+      async function webdisGet(key) {
         try {
-          const res = await fetch(`${WEBDIS_BASE}/GET/${encodeURIComponent(key)}.json`);
+          const res = await fetch(`${WEBDIS_BASE}/GET/${encodeURIComponent(key)}.json`, { cache: 'no-store' });
           if (!res.ok) return null;
           const data = await res.json();
           // Webdis returns { GET: ["value"] }
@@ -286,9 +284,9 @@
         }
       }
 
-      async function webdisSet(key: string, value: string) {
+      async function webdisSet(key, value) {
         try {
-          await fetch(`${WEBDIS_BASE}/SET/${encodeURIComponent(key)}/${encodeURIComponent(value)}.json`);
+          await fetch(`${WEBDIS_BASE}/SET/${encodeURIComponent(key)}/${encodeURIComponent(value)}.json`, { cache: 'no-store' });
           setWebdisOk(true);
         } catch (_) {
           setWebdisOk(false);
@@ -299,32 +297,32 @@
       useEffect(() => {
         let stop = false;
         async function poll() {
-          const results = await Promise.all(
-            PHASE_KEYS.map(async (k) => ({ k, v: await webdisGet(k) }))
-          );
+          try {
+            const results = await Promise.all(PHASE_KEYS.map(async (k) => ({ k, v: await webdisGet(k) })));
+            const active = results
+              .filter((r) => {
+                const v = r.v;
+                if (v == null) return false;
+                const s = String(v).toLowerCase();
+                return s === "true" || s === "1" || s === "yes" || s === "on";
+              })
+              .map((r) => r.k);
 
-          // interpret truthy: "true", "1", yes
-          const active = results
-            .filter((r) => {
-              const v = r.v;
-              if (v == null) return false;
-              const s = String(v).toLowerCase();
-              return s === "true" || s === "1" || s === "yes";
-            })
-            .map((r) => r.k);
-
-          if (active.length === 0) {
-            setActivePhase("Phase4");
-            setFallFactor(PHASE_MAP["Phase4"]);
-          } else {
-            // choose the highest numeric mapped factor
-            const best = active.reduce((acc, k) => (PHASE_MAP[k] > PHASE_MAP[acc] ? k : acc), active[0]);
-            setActivePhase(best);
-            setFallFactor(PHASE_MAP[best]);
+            if (active.length === 0) {
+              setActivePhase("Phase4");
+              setFallFactor(PHASE_MAP["Phase4"]);
+            } else {
+              // choose the highest numeric mapped factor
+              const best = active.reduce((acc, k) => (PHASE_MAP[k] > PHASE_MAP[acc] ? k : acc), active[0]);
+              setActivePhase(best);
+              setFallFactor(PHASE_MAP[best]);
+            }
+            setWebdisOk(true);
+          } catch (e) {
+            setWebdisOk(false);
+          } finally {
+            if (!stop) setTimeout(poll, 1000);
           }
-
-          setWebdisOk(true);
-          if (!stop) setTimeout(poll, 1000);
         }
         poll();
         return () => { stop = true; };
@@ -344,7 +342,7 @@
       useEffect(() => {
         if (!nextTarget) return;
         const key = `${nextTarget.name}:${nextTarget.r.toFixed(2)}`;
-        if (lastTriggerKeyRef.current === key) return; // already fired for this boundary
+        if (lastTriggerKeyRef.current === key) return;
         if (orbit.r <= nextTarget.r) {
           if (webhookEnabled && webhookUrl) {
             try {
@@ -364,32 +362,11 @@
         }
       }, [orbit.r, nextTarget, webhookEnabled, webhookUrl]);
 
-      // ===== Basic runtime self-tests (console) =====
-      useEffect(() => {
-        if (typeof window === "undefined") return;
-        const w = window as any;
-        if (w.__ORBIT_SELFTEST__) return;
-        w.__ORBIT_SELFTEST__ = true;
-
-        // Test 1: orbital period formula sanity — v=1, r=100 => ~2π*100
-        const v = 1, r = 100;
-        const Texpected = (2 * Math.PI * r) / v;
-        const Testimated = (() => {
-          const ang = v / r;
-          return (2 * Math.PI) / ang;
-        })();
-        console.assert(Math.abs(Testimated - Texpected) < 1e-6, "Orbital period formula mismatch");
-
-        // Test 2: stepOrbit should not increase radius when drag+gravity present (dt>0)
-        const s0 = createOrbitState();
-        const s1 = stepOrbit({ ...s0 }, 0.5, 1.0);
-        console.assert(s1.r <= s0.r, "Radius should not increase under inward acceleration");
-      }, []);
-
       const monospace = {
-        fontFamily:
-          'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
-      } as React.CSSProperties;
+        fontFamily:'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+      };
+
+      const planetCenterY = shipBaseY + orbit.r;
 
       // ===== UI =====
       return (
@@ -403,34 +380,29 @@
             </div>
 
             {/* World */}
-            <svg width={500} height={500} viewBox="0 0 500 500" style={{ border: "1px solid #222", background: "#000" }}>
+            <svg width="500" height="500" viewBox="0 0 500 500" style={{ border: "1px solid #222", background: "#000" }}>
               <g transform={cameraTransform}>
-                <circle cx={shipBaseX} cy={shipBaseY + orbit.r} r={40} fill="#1e3a8a" />
+                <circle cx={250} cy={planetCenterY} r="40" fill="#1e3a8a" />
                 {layers.map((l, i) => (
-                  <circle key={i} cx={shipBaseX} cy={shipBaseY + orbit.r} r={l.r} fill="none" stroke={l.color} strokeWidth={2} strokeOpacity={0.3} />
+                  <circle key={i} cx={250} cy={planetCenterY} r={l.r} fill="none" stroke={l.color} strokeWidth="2" strokeOpacity="0.3" />
                 ))}
-                <path d={fullPath} fill="none" stroke="#00ffff" strokeWidth={1} strokeDasharray="3,3" strokeOpacity={0.6} />
+                <path d={fullPath} fill="none" stroke="#00ffff" strokeWidth="1" strokeDasharray="3,3" strokeOpacity="0.6" />
               </g>
 
               {/* Ship reticle & HUD vectors (unscaled) */}
-              <circle cx={shipBaseX} cy={shipBaseY} r={6} fill="#22c55e" />
-              <line x1={shipBaseX} y1={shipBaseY} x2={shipBaseX + vx} y2={shipBaseY} stroke="#60a5fa" strokeWidth={2} />
-              <polygon points={`${shipBaseX + vx},${shipBaseY} ${shipBaseX + vx - 6},${shipBaseY - 4} ${shipBaseX + vx - 6},${shipBaseY + 4}`} fill="#60a5fa" />
-              <line x1={shipBaseX} y1={shipBaseY} x2={shipBaseX} y2={shipBaseY + vy} stroke="#f87171" strokeWidth={2} />
-              <polygon points={`${shipBaseX},${shipBaseY + vy} ${shipBaseX - 4},${shipBaseY + vy - 6} ${shipBaseX + 4},${shipBaseY + vy - 6}`} fill="#f87171" />
+              <circle cx={250} cy={shipBaseY} r="6" fill="#22c55e" />
+              <line x1={250} y1={shipBaseY} x2={250 + vx} y2={shipBaseY} stroke="#60a5fa" strokeWidth="2" />
+              <polygon points={`${250 + vx},${shipBaseY} ${250 + vx - 6},${shipBaseY - 4} ${250 + vx - 6},${shipBaseY + 4}`} fill="#60a5fa" />
+              <line x1={250} y1={shipBaseY} x2={250} y2={shipBaseY + vy} stroke="#f87171" strokeWidth="2" />
+              <polygon points={`${250},${shipBaseY + vy} ${250 - 4},${shipBaseY + vy - 6} ${250 + 4},${shipBaseY + vy - 6}`} fill="#f87171" />
             </svg>
 
             {/* Readouts */}
             <div style={{ marginTop: 12, fontSize: 16, textAlign: "center", maxWidth: 520 }}>
-              <div>
-                Current Layer: <strong>{currentLayer}</strong>
-              </div>
-              <div>
-                Radius: <strong>{orbit.r.toFixed(1)}</strong> | Velocity: <strong>{orbit.v.toFixed(3)}</strong>
-              </div>
-              <div>
-                Fall Factor (Webdis): <strong>{fallFactor}</strong> <span style={{ opacity: 0.8 }}>({activePhase})</span>
-                {" "}| Webdis: <strong>{webdisOk == null ? "…" : webdisOk ? "OK" : "Error"}</strong>
+              <div>Current Layer: <strong>{currentLayer}</strong></div>
+              <div>Radius: <strong>{orbit.r.toFixed(1)}</strong> | Velocity: <strong>{orbit.v.toFixed(3)}</strong></div>
+              <div>Fall Factor (Webdis): <strong>{fallFactor}</strong> <span style={{ opacity: 0.8 }}>({activePhase})</span>
+                {" "} | Webdis: <strong>{webdisOk == null ? "…" : webdisOk ? "OK" : "Error"}</strong>
               </div>
 
               {/* Orbital period */}
@@ -464,9 +436,7 @@
                       ) : b.status === "—" ? (
                         <span>—</span>
                       ) : (
-                        <span>
-                          sim: {b.etaSim!.toFixed(1)}s | real: {b.etaReal!.toFixed(1)}s
-                        </span>
+                        <span>sim: {b.etaSim.toFixed(1)}s | real: {b.etaReal.toFixed(1)}s</span>
                       )}
                     </li>
                   ))}
@@ -474,20 +444,20 @@
               </div>
             </div>
 
-            {/* Controls (fallFactor slider removed; Webdis drives it) */}
+            {/* Controls */}
             <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
               <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
                 <label htmlFor="simRate" style={{ width: 110 }}>Sim Rate</label>
-                <input id="simRate" type="range" min={0.1} max={10} step={0.1} value={simRate}
-                       onChange={(e) => setSimRate(parseFloat((e.target as HTMLInputElement).value))}
+                <input id="simRate" type="range" min="0.1" max="10" step="0.1" value={simRate}
+                       onChange={(e) => setSimRate(parseFloat(e.target.value))}
                        style={{ width: 280 }} />
                 <span style={{ minWidth: 60, textAlign: "right" }}>{simRate.toFixed(1)}×</span>
               </div>
 
               <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
                 <label htmlFor="speedSetpoint" style={{ width: 110 }}>Orbital Speed</label>
-                <input id="speedSetpoint" type="range" min={0.1} max={10} step={0.1} value={speedSetpoint}
-                       onChange={(e) => setSpeedSetpoint(parseFloat((e.target as HTMLInputElement).value))}
+                <input id="speedSetpoint" type="range" min="0.1" max="10" step="0.1" value={speedSetpoint}
+                       onChange={(e) => setSpeedSetpoint(parseFloat(e.target.value))}
                        style={{ width: 280 }} />
                 <button onClick={() => setOrbit((prev) => ({ ...prev, v: speedSetpoint }))}>Apply</button>
                 <span style={{ minWidth: 60, textAlign: "right" }}>{speedSetpoint.toFixed(1)}</span>
@@ -496,17 +466,12 @@
               {/* Webhook controls */}
               <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
                 <label htmlFor="webhookUrl" style={{ width: 110 }}>Webhook URL</label>
-                <input
-                  id="webhookUrl"
-                  type="text"
-                  placeholder="https://example.com/hook"
-                  value={webhookUrl}
-                  onChange={(e) => setWebhookUrl((e.target as HTMLInputElement).value)}
-                  style={{ width: 280, padding: 4, background: '#0b0b0b', border: '1px solid #333', color: '#fff', borderRadius: 6 }}
-                />
+                <input id="webhookUrl" type="text" placeholder="https://example.com/hook"
+                       value={webhookUrl} onChange={(e) => setWebhookUrl(e.target.value)}
+                       style={{ width: 280, padding: 4, background: '#0b0b0b', border: '1px solid #333', color: '#fff', borderRadius: 6 }} />
                 <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                   <input type="checkbox" checked={webhookEnabled}
-                         onChange={(e) => setWebhookEnabled((e.target as HTMLInputElement).checked)} /> Enable
+                         onChange={(e) => setWebhookEnabled(e.target.checked)} /> Enable
                 </label>
               </div>
             </div>
