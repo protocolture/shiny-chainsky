@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Orbit Decay UI — True Seconds</title>
+  <title>Orbit Decay UI — True Seconds (Fixed ETA)</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
@@ -155,7 +155,7 @@
         lastTRef.current = performance.now();
         rafRef.current = requestAnimationFrame(tick);
         return () => cancelAnimationFrame(rafRef.current);
-      }, [fallFactor, simRate, orbit]); // orbit in deps keeps it fresh; React batches updates
+      }, [fallFactor, simRate, orbit]);
 
       // ===== Camera / View =====
       const shipBaseX = 250;
@@ -259,6 +259,23 @@
           return { ...b, status: "ETA", etaSim: sim, etaReal: real };
         });
       }, [allBoundaries, orbit, fallFactor, simRate]);
+
+      // >>>>>>>>>>> FIXED: define next-target ETA values <<<<<<<<<<
+      const etaSimSeconds = useMemo(() => {
+        if (!nextTarget) return null;
+        let s = { ...orbit, mu: fallFactor };
+        let t = 0, steps = 0, dt = 0.05, MAX = 200000;
+        while (s.r > nextTarget.r && steps++ < MAX) {
+          s = stepOrbit({ ...s }, dt, fallFactor);
+          t += dt;
+          if (s.r <= 40) break;
+        }
+        return steps >= MAX ? null : t;
+      }, [orbit, fallFactor, nextTarget]);
+
+      const etaRealSeconds = useMemo(() => (
+        etaSimSeconds == null ? null : etaSimSeconds / Math.max(simRate, 0.0001)
+      ), [etaSimSeconds, simRate]);
 
       // ===== Webdis GET/SET =====
       async function webdisGet(key) {
@@ -377,19 +394,19 @@
               <div>Current Layer: <strong>{currentLayer}</strong></div>
               <div>Radius: <strong>{orbit.r.toFixed(1)}</strong> | Velocity: <strong>{orbit.v.toFixed(3)}</strong></div>
               <div>
-                Fall Factor (Webdis): <strong>{fallFactor}</strong> <span class="dim">({activePhase})</span>
+                Fall Factor (Webdis): <strong>{fallFactor}</strong> <span className="dim">({activePhase})</span>
                 {" "} | Webdis: <strong>{webdisOk == null ? "…" : webdisOk ? "OK" : "Error"}</strong>
               </div>
-              <div class="dim" style={{ fontSize: 14, marginTop: 4 }}>
+              <div className="dim" style={{ fontSize: 14, marginTop: 4 }}>
                 Phase reads — P1:{String(phaseReads.Phase1)} | P2:{String(phaseReads.Phase2)} | P3:{String(phaseReads.Phase3)} | P4:{String(phaseReads.Phase4)}
               </div>
 
               <div style={{ marginTop: 6 }}>
-                Orbital Period — sim: 
+                Orbital Period — sim:
                 <strong title={(orbitalPeriodSimSeconds ?? 0).toFixed(1) + ' s'}>
                   {" "}{fmtHMS(orbitalPeriodSimSeconds)}
                 </strong>
-                {" "} | real @ {simRate.toFixed(1)}×: 
+                {" "} | real @ {simRate.toFixed(1)}×:
                 <strong title={(orbitalPeriodRealSeconds ?? 0).toFixed(1) + ' s'}>
                   {" "}{fmtHMS(orbitalPeriodRealSeconds)}
                 </strong>
@@ -408,7 +425,7 @@
               </div>
 
               <div style={{ marginTop: 8, textAlign: "left", marginInline: "auto", width: 420 }}>
-                <div class="dim" style={{ marginBottom: 4 }}>Layer Crossings:</div>
+                <div className="dim" style={{ marginBottom: 4 }}>Layer Crossings:</div>
                 <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
                   {layerETAs.map((b, idx) => (
                     <li key={idx} style={{ display: "flex", justifyContent: "space-between", padding: "2px 0" }}>
