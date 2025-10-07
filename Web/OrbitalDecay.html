@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Orbit Decay UI — Webdis Phases (fixed)</title>
+  <title>Orbit Decay UI — Webdis Phases (MGET + JSONP fixed)</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
@@ -75,6 +75,57 @@
       if (v == null) return false;
       const s = String(v).trim().toLowerCase();
       return s === "true" || s === "1" || s === "yes" || s === "on";
+    }
+
+    // ===== JSONP + MGET helpers (handles CORS or JSONP) =====
+    function jsonp(url, timeoutMs = 3000) {
+      return new Promise((resolve, reject) => {
+        const cb = "__wd_cb_" + Math.random().toString(36).slice(2);
+        const s = document.createElement('script');
+        const t = setTimeout(() => { cleanup(); reject(new Error("JSONP timeout: " + url)); }, timeoutMs);
+        function cleanup(){ clearTimeout(t); delete window[cb]; if (s.parentNode) s.parentNode.removeChild(s); }
+        window[cb] = (payload) => { cleanup(); resolve(payload); };
+        s.src = url + (url.includes('?') ? '&' : '?') + "callback=" + cb;
+        s.onerror = () => { cleanup(); reject(new Error("JSONP load error: " + url)); };
+        document.head.appendChild(s);
+      });
+    }
+
+    function parseWebdisMGetPayload(payload) {
+      if (!payload) return null;
+      let arr = payload.MGET || payload.mget;
+      if (!arr) return null;
+      if (Array.isArray(arr)) return arr.map(v => v == null ? null : String(v).trim());
+      if (typeof arr === 'object' && Array.isArray(arr.values)) return arr.values.map(v => v == null ? null : String(v).trim());
+      return null;
+    }
+
+    async function webdisMGet(keys) {
+      const path = `${WEBDIS_BASE}/MGET/` + keys.map(k => encodeURIComponent(k)).join('/') + `.json`;
+      try {
+        const res = await fetch(path, { cache: 'no-store', mode: 'cors' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        const arr = parseWebdisMGetPayload(data);
+        if (arr) return arr;
+      } catch (_) { /* try JSONP */ }
+      try {
+        const jp = await jsonp(`${WEBDIS_BASE}/MGET/` + keys.map(k => encodeURIComponent(k)).join('/') + `.jsonp`);
+        const arr = parseWebdisMGetPayload(jp);
+        return arr || keys.map(() => null);
+      } catch (_) {
+        return keys.map(() => null);
+      }
+    }
+
+    async function webdisSet(key, value) {
+      try {
+        const httpUrl = `${WEBDIS_BASE}/SET/${encodeURIComponent(key)}/${encodeURIComponent(value)}.json`;
+        await fetch(httpUrl, { cache: 'no-store', mode: 'cors' });
+      } catch (_) {
+        // JSONP fallback
+        try { await jsonp(`${WEBDIS_BASE}/SET/${encodeURIComponent(key)}/${encodeURIComponent(value)}.jsonp`); } catch {}
+      }
     }
 
     function App() {
@@ -229,70 +280,31 @@
         });
       }, [allBoundaries, orbit, fallFactor, simRate]);
 
-      // ===== Webdis helpers (robust parsing) =====
-      async function webdisGet(key) {
-        try {
-          const url = `${WEBDIS_BASE}/GET/${encodeURIComponent(key)}.json`;
-          const res = await fetch(url, { cache: 'no-store' });
-          if (!res.ok) return null;
-
-          // Try JSON first
-          try {
-            const data = await res.json();
-            // Accept both shapes: {GET:["value"]} or {GET:{key:"K", value:"V"}}
-            if (data && data.GET !== undefined) {
-              const g = data.GET;
-              if (Array.isArray(g) && g.length) return String(g[0]).trim();
-              if (g && typeof g === 'object' && 'value' in g) return String(g.value).trim();
-            }
-          } catch {
-            // Fallback to text (some proxies or configs)
-            const txt = await res.text();
-            return txt ? String(txt).trim() : null;
-          }
-          return null;
-        } catch (e) {
-          return null;
-        }
-      }
-
-      async function webdisSet(key, value) {
-        try {
-          const url = `${WEBDIS_BASE}/SET/${encodeURIComponent(key)}/${encodeURIComponent(value)}.json`;
-          const res = await fetch(url, { cache: 'no-store' });
-          setWebdisOk(res.ok);
-        } catch (_) {
-          setWebdisOk(false);
-        }
-      }
-
-      // Optional ping to detect connectivity early
+      // Optional ping so we can show a quick OK/Error
       useEffect(() => {
         (async () => {
           try {
-            const res = await fetch(`${WEBDIS_BASE}/PING.json`, { cache: 'no-store' });
+            const res = await fetch(`${WEBDIS_BASE}/PING.json`, { cache: 'no-store', mode: 'cors' });
             setWebdisOk(res.ok);
           } catch { setWebdisOk(false); }
         })();
       }, []);
 
-      // Poll phases and apply highest mapped factor among truthy
+      // Poll phases via MGET and apply highest mapped factor among truthy
       useEffect(() => {
         let stop = false;
         async function poll() {
           try {
-            const results = await Promise.all(PHASE_KEYS.map(async (k) => ({ k, v: await webdisGet(k) })));
+            const vals = await webdisMGet(PHASE_KEYS);
             const reads = {};
-            results.forEach(r => { reads[r.k] = r.v; });
+            PHASE_KEYS.forEach((k, i) => { reads[k] = vals[i]; });
             setPhaseReads(reads);
 
-            const active = results.filter(r => isTruthy(r.v)).map(r => r.k);
-
+            const active = PHASE_KEYS.filter((k, i) => isTruthy(vals[i]));
             if (active.length === 0) {
               setActivePhase("Phase4");
               setFallFactor(PHASE_MAP["Phase4"]);
             } else {
-              // pick the phase with the largest numeric mapped factor
               const best = active.reduce((acc, k) => (PHASE_MAP[k] > PHASE_MAP[acc] ? k : acc), active[0]);
               setActivePhase(best);
               setFallFactor(PHASE_MAP[best]);
@@ -343,7 +355,7 @@
       }, [orbit.r, nextTarget, webhookEnabled, webhookUrl]);
 
       const mono = { fontFamily:'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace' };
-      const planetCenterY = shipBaseY + orbit.r;
+      const planetCenterY = 100 + orbit.r;
 
       return (
         <div style={{ background: "#000", color: "#fff", height: "100vh", display: "grid", placeItems: "center" }}>
@@ -366,11 +378,11 @@
               </g>
 
               {/* Ship + vectors */}
-              <circle cx="250" cy={shipBaseY} r="6" fill="#22c55e" />
-              <line x1="250" y1={shipBaseY} x2={250 + vx} y2={shipBaseY} stroke="#60a5fa" strokeWidth="2" />
-              <polygon points={`${250 + vx},${shipBaseY} ${250 + vx - 6},${shipBaseY - 4} ${250 + vx - 6},${shipBaseY + 4}`} fill="#60a5fa" />
-              <line x1="250" y1={shipBaseY} x2="250" y2={shipBaseY + vy} stroke="#f87171" strokeWidth="2" />
-              <polygon points={`${250},${shipBaseY + vy} ${250 - 4},${shipBaseY + vy - 6} ${250 + 4},${shipBaseY + vy - 6}`} fill="#f87171" />
+              <circle cx="250" cy="100" r="6" fill="#22c55e" />
+              <line x1="250" y1="100" x2={250 + 20*orbit.v} y2="100" stroke="#60a5fa" strokeWidth="2" />
+              <polygon points={`${250 + 20*orbit.v},${100} ${250 + 20*orbit.v - 6},${100 - 4} ${250 + 20*orbit.v - 6},${100 + 4}`} fill="#60a5fa" />
+              <line x1="250" y1="100" x2="250" y2={100 + 300*(dragAccel+gravityAccel)} stroke="#f87171" strokeWidth="2" />
+              <polygon points={`${250},${100 + 300*(dragAccel+gravityAccel)} ${250 - 4},${100 + 300*(dragAccel+gravityAccel) - 6} ${250 + 4},${100 + 300*(dragAccel+gravityAccel) - 6}`} fill="#f87171" />
             </svg>
 
             {/* Readouts */}
