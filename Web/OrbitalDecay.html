@@ -2,20 +2,22 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Orbit Decay UI — Webdis Phases (MGET + JSONP fixed)</title>
+  <title>Orbit Decay UI — True Seconds</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <style>
-    html, body { margin: 0; height: 100%; background: #000; }
+    html, body { margin: 0; height: 100%; background: #000; color:#fff; }
     button { background:#111; color:#fff; border:1px solid #333; border-radius:6px; padding:4px 10px; cursor:pointer; }
     button:hover { border-color:#555; }
     input[type="range"] { accent-color:#0ea5e9; }
-    #errbar { position: fixed; top: 0; left: 0; right: 0; background: #7f1d1d; color: #fff; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; padding: 6px 10px; display:none; z-index: 9999; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    #errbar { position: fixed; top: 0; left: 0; right: 0; background: #7f1d1d; color: #fff; padding: 6px 10px; display:none; z-index: 9999; }
+    .dim { opacity: .85 }
   </style>
 </head>
-<body>
+<body class="mono">
   <div id="errbar"></div>
   <div id="root"></div>
 
@@ -28,7 +30,7 @@
     });
     window.addEventListener('unhandledrejection', (e) => {
       errbar.style.display = 'block';
-      errbar.textContent = 'Unhandled promise rejection: ' + (e.reason && e.reason.message ? e.reason.message : e.reason);
+      errbar.textContent = 'Unhandled promise: ' + (e.reason && e.reason.message ? e.reason.message : e.reason);
       console.error(e.reason);
     });
   </script>
@@ -41,7 +43,25 @@
     const PHASE_KEYS = ["Phase1", "Phase2", "Phase3", "Phase4"];
     const PHASE_MAP  = { Phase1: 490, Phase2: 365, Phase3: 244, Phase4: 182 };
 
+    // ===== Helpers =====
+    const fmtHMS = (secs) => {
+      if (secs == null || !isFinite(secs)) return "—";
+      const s = Math.max(0, Math.floor(secs));
+      const h = Math.floor(s / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      const sec = s % 60;
+      const pad = (n) => n.toString().padStart(2, "0");
+      return `${h}:${pad(m)}:${pad(sec)}`;
+    };
+
+    const isTruthy = (v) => {
+      if (v == null) return false;
+      const s = String(v).trim().toLowerCase();
+      return s === "true" || s === "1" || s === "yes" || s === "on";
+    };
+
     function createOrbitState() {
+      // Units are arbitrary but time is *true seconds*; dt is real seconds × simRate.
       return { r: 145, v: 1.0, theta: 0, mu: 1.0, Cd: 2.2, A: 1.0, m: 1.0 };
     }
 
@@ -52,85 +72,32 @@
       return 0.01 * Math.exp(-(h - 40) / 5);
     }
 
-    function stepOrbit(state, dt, velocityBoost) {
+    function stepOrbit(state, dtSimSeconds, fallFactor) {
+      // dtSimSeconds is *true seconds* of simulation time this step.
       const rho = atmosphericDensity(state.r);
-      const dragAccel = 0.5 * state.Cd * (state.A / state.m) * rho * state.v * state.v * velocityBoost;
+      const dragAccel = 0.5 * state.Cd * (state.A / state.m) * rho * state.v * state.v * fallFactor;
       const gravityAccel = state.mu / (state.r * state.r);
       const inwardAccel = dragAccel + gravityAccel;
 
-      state.v += (gravityAccel - dragAccel) * dt;
+      // tangential velocity change
+      state.v += (gravityAccel - dragAccel) * dtSimSeconds;
       if (state.v > 10) state.v = 10;
       if (state.v < 0.1) state.v = 0.1;
 
-      state.r -= inwardAccel * dt * state.v * 0.5;
+      // radial change
+      state.r -= inwardAccel * dtSimSeconds * state.v * 0.5;
       if (state.r < 40) state.r = 40;
 
-      const angularRate = state.v / state.r;
-      state.theta += angularRate * dt;
+      // angle advance
+      const angularRate = state.v / state.r; // rad/s
+      state.theta += angularRate * dtSimSeconds;
       return state;
     }
 
-    // Robust truthy check
-    function isTruthy(v) {
-      if (v == null) return false;
-      const s = String(v).trim().toLowerCase();
-      return s === "true" || s === "1" || s === "yes" || s === "on";
-    }
-
-    // ===== JSONP + MGET helpers (handles CORS or JSONP) =====
-    function jsonp(url, timeoutMs = 3000) {
-      return new Promise((resolve, reject) => {
-        const cb = "__wd_cb_" + Math.random().toString(36).slice(2);
-        const s = document.createElement('script');
-        const t = setTimeout(() => { cleanup(); reject(new Error("JSONP timeout: " + url)); }, timeoutMs);
-        function cleanup(){ clearTimeout(t); delete window[cb]; if (s.parentNode) s.parentNode.removeChild(s); }
-        window[cb] = (payload) => { cleanup(); resolve(payload); };
-        s.src = url + (url.includes('?') ? '&' : '?') + "callback=" + cb;
-        s.onerror = () => { cleanup(); reject(new Error("JSONP load error: " + url)); };
-        document.head.appendChild(s);
-      });
-    }
-
-    function parseWebdisMGetPayload(payload) {
-      if (!payload) return null;
-      let arr = payload.MGET || payload.mget;
-      if (!arr) return null;
-      if (Array.isArray(arr)) return arr.map(v => v == null ? null : String(v).trim());
-      if (typeof arr === 'object' && Array.isArray(arr.values)) return arr.values.map(v => v == null ? null : String(v).trim());
-      return null;
-    }
-
-    async function webdisMGet(keys) {
-      const path = `${WEBDIS_BASE}/MGET/` + keys.map(k => encodeURIComponent(k)).join('/') + `.json`;
-      try {
-        const res = await fetch(path, { cache: 'no-store', mode: 'cors' });
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const data = await res.json();
-        const arr = parseWebdisMGetPayload(data);
-        if (arr) return arr;
-      } catch (_) { /* try JSONP */ }
-      try {
-        const jp = await jsonp(`${WEBDIS_BASE}/MGET/` + keys.map(k => encodeURIComponent(k)).join('/') + `.jsonp`);
-        const arr = parseWebdisMGetPayload(jp);
-        return arr || keys.map(() => null);
-      } catch (_) {
-        return keys.map(() => null);
-      }
-    }
-
-    async function webdisSet(key, value) {
-      try {
-        const httpUrl = `${WEBDIS_BASE}/SET/${encodeURIComponent(key)}/${encodeURIComponent(value)}.json`;
-        await fetch(httpUrl, { cache: 'no-store', mode: 'cors' });
-      } catch (_) {
-        // JSONP fallback
-        try { await jsonp(`${WEBDIS_BASE}/SET/${encodeURIComponent(key)}/${encodeURIComponent(value)}.jsonp`); } catch {}
-      }
-    }
-
     function App() {
+      // ===== State =====
       const [orbit, setOrbit] = useState(createOrbitState());
-      const [fallFactor, setFallFactor] = useState(PHASE_MAP["Phase4"]); // default lowest
+      const [fallFactor, setFallFactor] = useState(PHASE_MAP.Phase4);
       const [simRate, setSimRate] = useState(1);
       const [speedSetpoint, setSpeedSetpoint] = useState(1.0);
       const [view, setView] = useState(1);
@@ -143,6 +110,11 @@
       const lastTriggerKeyRef = useRef("");
       const sentLayerFlagsRef = useRef({});
 
+      // raf integrator refs
+      const rafRef = useRef(0);
+      const lastTRef = useRef(performance.now()); // ms
+
+      // ===== Layers / boundaries =====
       const layers = useMemo(
         () => [
           { name: "Cloud Deck", key: "CloudDeck", r: 140, color: "#facc15" },
@@ -157,17 +129,39 @@
         [layers]
       );
 
-      // ===== Ticker =====
+      // ===== Real-time integrator: true seconds via rAF =====
       useEffect(() => {
-        const id = setInterval(() => {
-          setOrbit(prev => stepOrbit({ ...prev, mu: fallFactor }, 0.03 * simRate, fallFactor));
-        }, 30);
-        return () => clearInterval(id);
-      }, [fallFactor, simRate]);
+        const tick = () => {
+          const now = performance.now();
+          const dtReal = (now - lastTRef.current) / 1000; // seconds
+          lastTRef.current = now;
+
+          // simulation dt = real seconds × simRate
+          const dtSim = Math.max(0, dtReal) * simRate;
+
+          // integrate with a small substep for stability if very large dtSim
+          let remain = dtSim;
+          const maxStep = 0.03; // 30 ms sim time sub-steps
+          let s = orbit;
+          while (remain > 1e-6) {
+            const step = Math.min(remain, maxStep);
+            s = stepOrbit({ ...s, mu: fallFactor }, step, fallFactor);
+            remain -= step;
+          }
+          setOrbit(s);
+
+          rafRef.current = requestAnimationFrame(tick);
+        };
+        lastTRef.current = performance.now();
+        rafRef.current = requestAnimationFrame(tick);
+        return () => cancelAnimationFrame(rafRef.current);
+      }, [fallFactor, simRate, orbit]); // orbit in deps keeps it fresh; React batches updates
 
       // ===== Camera / View =====
       const shipBaseX = 250;
-      const shipBaseY = 100;
+      const shipBaseY = 100; // ship is HUD-locked
+      const planetCenterY = shipBaseY + orbit.r;
+
       let shipY = shipBaseY, scale = 1, translateY = 0;
       if (view === 2) { shipY = 250; translateY = shipY - shipBaseY; scale = 3; }
       else if (view === 3) { shipY = 250; translateY = shipY - shipBaseY; scale = 1; }
@@ -179,6 +173,7 @@
           : base;
       }, [translateY, scale]);
 
+      // ===== Current/next layers =====
       const currentLayer = useMemo(() => {
         const found = layers.find((l) => orbit.r > l.r);
         return found ? found.name : layers[layers.length - 1].name;
@@ -196,10 +191,10 @@
         return null;
       }, [boundaries, orbit.r]);
 
+      // ===== Future path (6 orbits) =====
       const fullPath = useMemo(() => {
         const pts = [];
-        const r0 = orbit.r;
-        const th0 = orbit.theta;
+        const r0 = orbit.r, th0 = orbit.theta;
         const shipPos = { x: r0 * Math.cos(th0), y: r0 * Math.sin(th0) };
         const T = { x: -Math.sin(th0), y: Math.cos(th0) };
         const In = { x: -Math.cos(th0), y: -Math.sin(th0) };
@@ -207,10 +202,10 @@
         let s = { ...orbit, mu: fallFactor };
         let lastTheta = s.theta, rotations = 0;
         const desiredRotations = 6;
-        let maxSteps = 200000;
+        let steps = 0, MAX = 200000;
 
-        while (s.r > 40 && rotations < desiredRotations && maxSteps-- > 0) {
-          s = stepOrbit({ ...s }, 0.03 * simRate, fallFactor);
+        while (s.r > 40 && rotations < desiredRotations && steps++ < MAX) {
+          s = stepOrbit({ ...s }, 0.03, fallFactor); // integrate in true sim seconds
           if (s.theta < lastTheta) rotations++;
           lastTheta = s.theta;
 
@@ -219,14 +214,12 @@
           const xh = rel.x * T.x + rel.y * T.y;
           const yh = rel.x * In.x + rel.y * In.y;
 
-          const px = shipBaseX + xh;
-          const py = shipBaseY + yh;
-          pts.push(`${px},${py}`);
+          pts.push(`${shipBaseX + xh},${shipBaseY + yh}`);
         }
         return `M ${shipBaseX},${shipBaseY} ${pts.map((p) => `L ${p}`).join(" ")}`;
-      }, [orbit, fallFactor, simRate]);
+      }, [orbit, fallFactor]);
 
-      // ===== Readouts =====
+      // ===== HUD vectors & numbers =====
       const rho = atmosphericDensity(orbit.r);
       const dragAccel = 0.5 * (orbit.Cd * (orbit.A / orbit.m)) * rho * orbit.v * orbit.v * fallFactor;
       const gravityAccel = fallFactor / (orbit.r * orbit.r);
@@ -234,27 +227,14 @@
       const vx = 20 * orbit.v;
       const vy = 300 * inwardAccel;
 
-      const etaSimSeconds = useMemo(() => {
-        if (!nextTarget) return null;
-        let s = { ...orbit, mu: fallFactor };
-        let t = 0, dt = 0.05, steps = 0, MAX = 200000;
-        while (s.r > nextTarget.r && steps++ < MAX) {
-          s = stepOrbit({ ...s }, dt, fallFactor);
-          t += dt;
-          if (s.r <= 40) break;
-        }
-        return steps >= MAX ? null : t;
-      }, [orbit, fallFactor, nextTarget]);
-
-      const etaRealSeconds = useMemo(() => etaSimSeconds == null ? null : (etaSimSeconds / Math.max(simRate, 0.0001)), [etaSimSeconds, simRate]);
-
+      // ===== Period & ETAs (all computed in true sim seconds) =====
       const orbitalPeriodSimSeconds = useMemo(() => {
-        const angRate = orbit.v / Math.max(orbit.r, 1e-6);
+        const angRate = orbit.v / Math.max(orbit.r, 1e-6); // rad/s
         return angRate <= 0 ? null : (2 * Math.PI) / angRate;
       }, [orbit.v, orbit.r]);
 
       const orbitalPeriodRealSeconds = useMemo(
-        () => orbitalPeriodSimSeconds == null ? null : (orbitalPeriodSimSeconds / Math.max(simRate, 0.0001)),
+        () => (orbitalPeriodSimSeconds == null ? null : orbitalPeriodSimSeconds / Math.max(simRate, 0.0001)),
         [orbitalPeriodSimSeconds, simRate]
       );
 
@@ -267,7 +247,7 @@
         return allBoundaries.map((b) => {
           if (orbit.r <= b.r) return { ...b, status: "Threshold Reached", etaSim: null, etaReal: null };
           let s = { ...orbit, mu: fallFactor };
-          let t = 0, dt = 0.05, steps = 0, MAX = 200000;
+          let t = 0, steps = 0, MAX = 200000, dt = 0.05; // 50 ms sim steps
           while (s.r > b.r && steps++ < MAX) {
             s = stepOrbit({ ...s }, dt, fallFactor);
             t += dt;
@@ -280,47 +260,54 @@
         });
       }, [allBoundaries, orbit, fallFactor, simRate]);
 
-      // Optional ping so we can show a quick OK/Error
+      // ===== Webdis GET/SET =====
+      async function webdisGet(key) {
+        try {
+          const res = await fetch(`${WEBDIS_BASE}/GET/${encodeURIComponent(key)}.json`, { cache: 'no-store' });
+          if (!res.ok) return null;
+          const data = await res.json();
+          if (data && data.GET && Array.isArray(data.GET)) return String(data.GET[0]).trim();
+          if (data && data.GET && data.GET.value !== undefined) return String(data.GET.value).trim();
+          return null;
+        } catch { return null; }
+      }
+      async function webdisSet(key, value) {
+        try {
+          const res = await fetch(`${WEBDIS_BASE}/SET/${encodeURIComponent(key)}/${encodeURIComponent(value)}.json`, { cache: 'no-store' });
+          setWebdisOk(res.ok);
+        } catch { setWebdisOk(false); }
+      }
+
+      // Ping
       useEffect(() => {
         (async () => {
-          try {
-            const res = await fetch(`${WEBDIS_BASE}/PING.json`, { cache: 'no-store', mode: 'cors' });
-            setWebdisOk(res.ok);
-          } catch { setWebdisOk(false); }
+          try { const r = await fetch(`${WEBDIS_BASE}/PING.json`, { cache: 'no-store' }); setWebdisOk(r.ok); }
+          catch { setWebdisOk(false); }
         })();
       }, []);
 
-      // Poll phases via MGET and apply highest mapped factor among truthy
+      // Poll phases (true seconds don’t affect this)
       useEffect(() => {
         let stop = false;
         async function poll() {
           try {
-            const vals = await webdisMGet(PHASE_KEYS);
-            const reads = {};
-            PHASE_KEYS.forEach((k, i) => { reads[k] = vals[i]; });
-            setPhaseReads(reads);
-
-            const active = PHASE_KEYS.filter((k, i) => isTruthy(vals[i]));
-            if (active.length === 0) {
-              setActivePhase("Phase4");
-              setFallFactor(PHASE_MAP["Phase4"]);
-            } else {
+            const results = await Promise.all(PHASE_KEYS.map(async (k) => ({ k, v: await webdisGet(k) })));
+            const reads = {}; results.forEach(r => { reads[r.k] = r.v; }); setPhaseReads(reads);
+            const active = results.filter(r => isTruthy(r.v)).map(r => r.k);
+            if (active.length === 0) { setActivePhase("Phase4"); setFallFactor(PHASE_MAP["Phase4"]); }
+            else {
               const best = active.reduce((acc, k) => (PHASE_MAP[k] > PHASE_MAP[acc] ? k : acc), active[0]);
-              setActivePhase(best);
-              setFallFactor(PHASE_MAP[best]);
+              setActivePhase(best); setFallFactor(PHASE_MAP[best]);
             }
             setWebdisOk(true);
-          } catch (e) {
-            setWebdisOk(false);
-          } finally {
-            if (!stop) setTimeout(poll, 1000);
-          }
+          } catch { setWebdisOk(false); }
+          finally { if (!stop) setTimeout(poll, 1000); }
         }
         poll();
         return () => { stop = true; };
       }, []);
 
-      // Emit layer-cross flags exactly once per key
+      // Fire layer flags once
       useEffect(() => {
         boundaries.forEach((b) => {
           if (orbit.r <= b.r && !sentLayerFlagsRef.current[b.key]) {
@@ -330,7 +317,7 @@
         });
       }, [boundaries, orbit.r]);
 
-      // Webhook on crossing
+      // Webhook
       useEffect(() => {
         if (!nextTarget) return;
         const key = `${nextTarget.name}:${nextTarget.r.toFixed(2)}`;
@@ -354,12 +341,10 @@
         }
       }, [orbit.r, nextTarget, webhookEnabled, webhookUrl]);
 
-      const mono = { fontFamily:'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace' };
-      const planetCenterY = 100 + orbit.r;
-
+      // ===== UI =====
       return (
-        <div style={{ background: "#000", color: "#fff", height: "100vh", display: "grid", placeItems: "center" }}>
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", background: "#000", ...mono }}>
+        <div style={{ height: "100vh", display: "grid", placeItems: "center" }}>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
             {/* Views */}
             <div style={{ marginBottom: 8, display: "flex", gap: 8 }}>
               <button onClick={() => setView(1)}>View 1</button>
@@ -378,35 +363,44 @@
               </g>
 
               {/* Ship + vectors */}
-              <circle cx="250" cy="100" r="6" fill="#22c55e" />
-              <line x1="250" y1="100" x2={250 + 20*orbit.v} y2="100" stroke="#60a5fa" strokeWidth="2" />
-              <polygon points={`${250 + 20*orbit.v},${100} ${250 + 20*orbit.v - 6},${100 - 4} ${250 + 20*orbit.v - 6},${100 + 4}`} fill="#60a5fa" />
-              <line x1="250" y1="100" x2="250" y2={100 + 300*(dragAccel+gravityAccel)} stroke="#f87171" strokeWidth="2" />
-              <polygon points={`${250},${100 + 300*(dragAccel+gravityAccel)} ${250 - 4},${100 + 300*(dragAccel+gravityAccel) - 6} ${250 + 4},${100 + 300*(dragAccel+gravityAccel) - 6}`} fill="#f87171" />
+              <circle cx="250" cy={shipBaseY} r="6" fill="#22c55e" />
+              {/* tangential (blue) */}
+              <line x1="250" y1={shipBaseY} x2={250 + 20*orbit.v} y2={shipBaseY} stroke="#60a5fa" strokeWidth="2" />
+              <polygon points={`${250 + 20*orbit.v},${shipBaseY} ${250 + 20*orbit.v - 6},${shipBaseY - 4} ${250 + 20*orbit.v - 6},${shipBaseY + 4}`} fill="#60a5fa" />
+              {/* radial (red) */}
+              <line x1="250" y1={shipBaseY} x2="250" y2={shipBaseY + 300*(dragAccel+gravityAccel)} stroke="#f87171" strokeWidth="2" />
+              <polygon points={`${250},${shipBaseY + 300*(dragAccel+gravityAccel)} ${250 - 4},${shipBaseY + 300*(dragAccel+gravityAccel) - 6} ${250 + 4},${shipBaseY + 300*(dragAccel+gravityAccel) - 6}`} fill="#f87171" />
             </svg>
 
             {/* Readouts */}
             <div style={{ marginTop: 12, fontSize: 16, textAlign: "center", maxWidth: 560 }}>
               <div>Current Layer: <strong>{currentLayer}</strong></div>
               <div>Radius: <strong>{orbit.r.toFixed(1)}</strong> | Velocity: <strong>{orbit.v.toFixed(3)}</strong></div>
-              <div>Fall Factor (Webdis): <strong>{fallFactor}</strong> <span style={{ opacity: 0.8 }}>({activePhase})</span>
+              <div>
+                Fall Factor (Webdis): <strong>{fallFactor}</strong> <span class="dim">({activePhase})</span>
                 {" "} | Webdis: <strong>{webdisOk == null ? "…" : webdisOk ? "OK" : "Error"}</strong>
               </div>
-              <div style={{ opacity: 0.8, fontSize: 14, marginTop: 4 }}>
+              <div class="dim" style={{ fontSize: 14, marginTop: 4 }}>
                 Phase reads — P1:{String(phaseReads.Phase1)} | P2:{String(phaseReads.Phase2)} | P3:{String(phaseReads.Phase3)} | P4:{String(phaseReads.Phase4)}
               </div>
 
               <div style={{ marginTop: 6 }}>
-                Orbital Period — sim: <strong>{orbitalPeriodSimSeconds == null ? "—" : orbitalPeriodSimSeconds.toFixed(1)}s</strong>
-                {" "}| real @ {simRate.toFixed(1)}×: <strong>{orbitalPeriodRealSeconds == null ? "—" : orbitalPeriodRealSeconds.toFixed(1)}s</strong>
+                Orbital Period — sim: 
+                <strong title={(orbitalPeriodSimSeconds ?? 0).toFixed(1) + ' s'}>
+                  {" "}{fmtHMS(orbitalPeriodSimSeconds)}
+                </strong>
+                {" "} | real @ {simRate.toFixed(1)}×: 
+                <strong title={(orbitalPeriodRealSeconds ?? 0).toFixed(1) + ' s'}>
+                  {" "}{fmtHMS(orbitalPeriodRealSeconds)}
+                </strong>
               </div>
 
               <div style={{ marginTop: 6 }}>
                 {nextTarget ? (
                   <>
                     Next: <strong>{nextTarget.name}</strong> @ r={nextTarget.r}
-                    {" "}| ETA (sim): <strong>{etaSimSeconds == null ? "—" : etaSimSeconds.toFixed(1)}s</strong>
-                    {" "}| ETA (real @ {simRate.toFixed(1)}×): <strong>{etaRealSeconds == null ? "—" : Math.max(0, etaRealSeconds).toFixed(1)}s</strong>
+                    {" "} | ETA (sim): <strong title={(etaSimSeconds ?? 0).toFixed(1) + ' s'}>{fmtHMS(etaSimSeconds)}</strong>
+                    {" "} | ETA (real @ {simRate.toFixed(1)}×): <strong title={(etaRealSeconds ?? 0).toFixed(1) + ' s'}>{fmtHMS(etaRealSeconds)}</strong>
                   </>
                 ) : (
                   <span>At crushdepth</span>
@@ -414,7 +408,7 @@
               </div>
 
               <div style={{ marginTop: 8, textAlign: "left", marginInline: "auto", width: 420 }}>
-                <div style={{ opacity: 0.9, marginBottom: 4 }}>Layer Crossings:</div>
+                <div class="dim" style={{ marginBottom: 4 }}>Layer Crossings:</div>
                 <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
                   {layerETAs.map((b, idx) => (
                     <li key={idx} style={{ display: "flex", justifyContent: "space-between", padding: "2px 0" }}>
@@ -424,7 +418,10 @@
                       ) : b.status === "—" ? (
                         <span>—</span>
                       ) : (
-                        <span>sim: {b.etaSim.toFixed(1)}s | real: {b.etaReal.toFixed(1)}s</span>
+                        <span>
+                          sim: <span title={(b.etaSim ?? 0).toFixed(1) + ' s'}>{fmtHMS(b.etaSim)}</span>
+                          {" "} | real: <span title={(b.etaReal ?? 0).toFixed(1) + ' s'}>{fmtHMS(b.etaReal)}</span>
+                        </span>
                       )}
                     </li>
                   ))}
