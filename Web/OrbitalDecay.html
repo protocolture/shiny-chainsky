@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Orbit HUD — CRT Green</title>
+  <title>Orbit HUD — CRT Green (Side Panel + Scaled Viewport)</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
 
   <!-- React + Babel for local run -->
@@ -15,14 +15,13 @@
 
   <style>
     :root {
-      --crt-green: #5fff85; /* phosphor green */
-      --crt-dim: #2a4;      /* dimmer green for borders/accents */
+      --crt-green: #5fff85;
+      --crt-dim: #2a4;
       --bg: #000000;
     }
     html, body { margin: 0; height: 100%; background: var(--bg); }
     body { color: var(--crt-green); font-family: 'VT323', ui-monospace, monospace; }
 
-    /* CRT container with scanlines, vignette, slight curvature */
     .crt {
       position: relative;
       min-height: 100vh;
@@ -31,7 +30,6 @@
       background: var(--bg);
       overflow: hidden;
     }
-    /* Scanlines */
     .crt::before {
       content: "";
       position: absolute; inset: 0;
@@ -46,7 +44,6 @@
       mix-blend-mode: screen;
       opacity: 0.45;
     }
-    /* Vignette / curvature */
     .crt::after {
       content: "";
       position: absolute; inset: 0;
@@ -56,8 +53,6 @@
       pointer-events: none;
       mix-blend-mode: multiply;
     }
-
-    /* Subtle flicker on text */
     .flicker {
       animation: flicker 2.5s infinite steps(60);
       text-shadow: 0 0 6px rgba(95,255,133,0.6), 0 0 24px rgba(95,255,133,0.25);
@@ -68,8 +63,22 @@
       81% { opacity: 0.98; }
     }
 
-    /* Panel & list */
-    .panel { max-width: 860px; margin: 14px auto; padding: 10px 14px; border: 1px solid var(--crt-dim); background: rgba(0,0,0,0.75); }
+    /* Two-column layout: left = panel, right = viewport */
+    .wrap {
+      width: 100%;
+      max-width: 1400px;
+      display: flex;
+      gap: 16px;
+      align-items: flex-start;
+      padding: 14px;
+    }
+
+    .panel {
+      flex: 0 0 480px;
+      border: 1px solid var(--crt-dim);
+      background: rgba(0,0,0,0.75);
+      padding: 10px 14px;
+    }
     .title { font-size: 26px; margin-bottom: 8px; }
     .row { font-size: 22px; display: flex; gap: 6px; margin: 6px 0; }
     .label { opacity: 0.85; }
@@ -77,11 +86,19 @@
     ul.layers { list-style:none; padding:0; margin: 8px 0 0 0; }
     ul.layers li { display:flex; justify-content:space-between; padding: 3px 0; font-size: 20px; }
 
-    /* Bigger orbital display (2×) */
-    svg { display:block; margin: 12px auto; border: 1px solid var(--crt-dim); background: #000; box-shadow: 0 0 20px rgba(95,255,133,0.2) inset; }
+    /* Viewport (shrink to 75% of previous 1000×1000 => 750×750) */
+    .viewport {
+      border: 1px solid var(--crt-dim);
+      background: #000;
+      box-shadow: 0 0 20px rgba(95,255,133,0.2) inset;
+    }
 
-    /* error bar */
-    #errbar { position: fixed; top: 0; left: 0; right: 0; background: #083; color: #caffda; padding: 6px 10px; display:none; z-index: 9999; border-bottom: 1px solid var(--crt-dim); }
+    #errbar {
+      position: fixed; top: 0; left: 0; right: 0;
+      background: #083; color: #caffda; padding: 6px 10px;
+      display:none; z-index: 9999; border-bottom: 1px solid var(--crt-dim);
+      font-family: 'VT323', ui-monospace, monospace;
+    }
   </style>
 </head>
 <body>
@@ -106,7 +123,7 @@
     const { useEffect, useMemo, useRef, useState } = React;
 
     // ===== Webdis config =====
-    const WEBDIS_BASE = "http://192.168.30.114:7379"; // adjust if needed
+    const WEBDIS_BASE = "http://192.168.30.114:7379";
     const PHASE_KEYS = ["Phase1", "Phase2", "Phase3", "Phase4"];
     const PHASE_MAP  = { Phase1: 490, Phase2: 365, Phase3: 244, Phase4: 182 }; // highest active wins
 
@@ -136,7 +153,7 @@
             if (Array.isArray(g) && g.length) return String(g[0]).trim();
             if (g && typeof g === "object" && "value" in g) return String(g.value).trim();
           }
-        } catch { /* fallback */ }
+        } catch {}
         const txt = await res.text();
         return txt ? String(txt).trim() : null;
       } catch { return null; }
@@ -271,19 +288,6 @@
         return `M 250,100 ${pts.map(p => `L ${p}`).join(" ")}`;
       }, [orbit, fallFactor]);
 
-      // Next ETA in true seconds
-      const nextEtaSeconds = useMemo(() => {
-        if (!nextTarget) return null;
-        let s = { ...orbit, mu: fallFactor };
-        let t = 0, dt = 0.05, steps = 0, MAX = 200000;
-        while (s.r > nextTarget.r && steps++ < MAX) {
-          s = stepOrbit({ ...s }, dt, fallFactor);
-          t += dt;
-          if (s.r <= 40) break;
-        }
-        return steps >= MAX ? null : t;
-      }, [orbit, fallFactor, nextTarget]);
-
       // All layer ETAs (true seconds)
       const layerETAs = useMemo(() => {
         return boundaries.map(b => {
@@ -319,31 +323,19 @@
       const vx = 20 * orbit.v;
       const vy = 300 * inward;
 
-      return (
-        <div style={{ width: "100%", maxWidth: "1200px", padding: "12px" }}>
-          {/* 2× Orbital display: width/height 1000 with viewBox 500 => doubles visuals */}
-          <svg width="1000" height="1000" viewBox="0 0 500 500">
-            <g>
-              <circle cx="250" cy={planetCY} r="40" fill="#0c2" />
-              {layers.map((l, i) => (
-                <circle key={i} cx="250" cy={planetCY} r={l.r} fill="none" stroke={l.color} strokeWidth="2" strokeOpacity="0.35" />
-              ))}
-              <path d={fullPath} fill="none" stroke="#7dffbf" strokeWidth="1" strokeDasharray="3,3" strokeOpacity="0.7" />
-            </g>
-            {/* Ship & HUD vectors */}
-            <circle cx="250" cy="100" r="6" fill="#5fff85" />
-            <line x1="250" y1="100" x2={250 + vx} y2="100" stroke="#7dffbf" strokeWidth="2" />
-            <line x1="250" y1="100" x2="250" y2={100 + vy} stroke="#7dffbf" strokeWidth="2" />
-          </svg>
+      // Scale scene by 1.25x about the center to compensate for smaller viewport
+      const sceneScale = "translate(250,250) scale(1.25) translate(-250,-250)";
 
-          {/* Minimal CRT readout */}
+      return (
+        <div className="wrap">
+          {/* Left: CRT readout */}
           <div className="panel flicker">
             <div className="title">ORBITAL STATUS — LINK: ACTIVE</div>
             <div className="row"><span className="label">Planet Name:</span><span className="value">Unknown</span></div>
             <div className="row"><span className="label">Planet Type:</span><span className="value">Unexplored Gas Giant.</span></div>
             <div className="row"><span className="label">Current Layer:</span><span className="value">{currentLayer}</span></div>
 
-            <div className="title" style={{ marginTop: "10px" }}>Layer Crossings (ETA in seconds)</div>
+            <div className="title" style={{ marginTop: 10 }}>Layer Crossings (ETA in seconds)</div>
             <ul className="layers">
               {layerETAs.map((b, idx) => (
                 <li key={idx}>
@@ -356,12 +348,24 @@
                 </li>
               ))}
             </ul>
-
-            <div className="row" style={{ marginTop: "8px" }}>
-              <span className="label">Next ETA (seconds):</span>
-              <span className="value">{nextTarget ? (nextEtaSeconds == null ? "—" : nextEtaSeconds.toFixed(1)) : "—"}</span>
-            </div>
           </div>
+
+          {/* Right: Viewport (shrunk to 750×750), contents scaled 1.25× */}
+          <svg className="viewport" width="750" height="750" viewBox="0 0 500 500">
+            <g transform={sceneScale}>
+              <g>
+                <circle cx="250" cy={planetCY} r="40" fill="#0c2" />
+                {layers.map((l, i) => (
+                  <circle key={i} cx="250" cy={planetCY} r={l.r} fill="none" stroke={l.color} strokeWidth="2" strokeOpacity="0.35" />
+                ))}
+                <path d={fullPath} fill="none" stroke="#7dffbf" strokeWidth="1" strokeDasharray="3,3" strokeOpacity="0.7" />
+              </g>
+              {/* Ship & HUD vectors */}
+              <circle cx="250" cy="100" r="6" fill="#5fff85" />
+              <line x1="250" y1="100" x2={250 + vx} y2="100" stroke="#7dffbf" strokeWidth="2" />
+              <line x1="250" y1="100" x2="250" y2={100 + vy} stroke="#7dffbf" strokeWidth="2" />
+            </g>
+          </svg>
         </div>
       );
     }
