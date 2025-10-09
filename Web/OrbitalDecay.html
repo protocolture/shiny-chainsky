@@ -2,28 +2,91 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Orbit HUD — Minimal Readout</title>
+  <title>Orbit HUD — CRT Green</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
+
+  <!-- React + Babel for local run -->
   <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- CRT green terminal font -->
+  <link href="https://fonts.googleapis.com/css2?family=VT323&display=swap" rel="stylesheet">
+
   <style>
-    html, body { margin: 0; height: 100%; background: #000; color:#fff; }
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
-    .panel { max-width: 640px; margin: 12px auto; padding: 10px 12px; background:#000; }
-    .title { font-size: 18px; margin-bottom: 6px; opacity: 0.95; }
-    .row { margin: 4px 0; }
+    :root {
+      --crt-green: #5fff85; /* phosphor green */
+      --crt-dim: #2a4;      /* dimmer green for borders/accents */
+      --bg: #000000;
+    }
+    html, body { margin: 0; height: 100%; background: var(--bg); }
+    body { color: var(--crt-green); font-family: 'VT323', ui-monospace, monospace; }
+
+    /* CRT container with scanlines, vignette, slight curvature */
+    .crt {
+      position: relative;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: var(--bg);
+      overflow: hidden;
+    }
+    /* Scanlines */
+    .crt::before {
+      content: "";
+      position: absolute; inset: 0;
+      background: repeating-linear-gradient(
+        to bottom,
+        rgba(95,255,133,0.06) 0px,
+        rgba(95,255,133,0.06) 2px,
+        rgba(0,0,0,0) 3px,
+        rgba(0,0,0,0) 4px
+      );
+      pointer-events: none;
+      mix-blend-mode: screen;
+      opacity: 0.45;
+    }
+    /* Vignette / curvature */
+    .crt::after {
+      content: "";
+      position: absolute; inset: 0;
+      background:
+        radial-gradient(circle at 50% 50%, rgba(0,0,0,0) 60%, rgba(0,0,0,0.35) 85%),
+        linear-gradient(to bottom, rgba(255,255,255,0.03), rgba(0,0,0,0) 40%, rgba(255,255,255,0.02) 60%, rgba(0,0,0,0.1));
+      pointer-events: none;
+      mix-blend-mode: multiply;
+    }
+
+    /* Subtle flicker on text */
+    .flicker {
+      animation: flicker 2.5s infinite steps(60);
+      text-shadow: 0 0 6px rgba(95,255,133,0.6), 0 0 24px rgba(95,255,133,0.25);
+    }
+    @keyframes flicker {
+      0%, 19%, 21%, 23%, 80%, 100% { opacity: 1; }
+      20%, 22% { opacity: 0.95; }
+      81% { opacity: 0.98; }
+    }
+
+    /* Panel & list */
+    .panel { max-width: 860px; margin: 14px auto; padding: 10px 14px; border: 1px solid var(--crt-dim); background: rgba(0,0,0,0.75); }
+    .title { font-size: 26px; margin-bottom: 8px; }
+    .row { font-size: 22px; display: flex; gap: 6px; margin: 6px 0; }
     .label { opacity: 0.85; }
     .value { font-weight: 700; }
-    ul.layers { list-style:none; padding:0; margin: 6px 0 0 0; }
-    ul.layers li { display:flex; justify-content:space-between; padding: 2px 0; }
-    svg { display:block; margin: 8px auto; border:1px solid #222; background:#000; }
-    #errbar { position: fixed; top: 0; left: 0; right: 0; background: #7f1d1d; color: #fff; padding: 6px 10px; display:none; z-index: 9999; }
+    ul.layers { list-style:none; padding:0; margin: 8px 0 0 0; }
+    ul.layers li { display:flex; justify-content:space-between; padding: 3px 0; font-size: 20px; }
+
+    /* Bigger orbital display (2×) */
+    svg { display:block; margin: 12px auto; border: 1px solid var(--crt-dim); background: #000; box-shadow: 0 0 20px rgba(95,255,133,0.2) inset; }
+
+    /* error bar */
+    #errbar { position: fixed; top: 0; left: 0; right: 0; background: #083; color: #caffda; padding: 6px 10px; display:none; z-index: 9999; border-bottom: 1px solid var(--crt-dim); }
   </style>
 </head>
 <body>
-  <div id="errbar" class="mono"></div>
-  <div id="root"></div>
+  <div id="errbar"></div>
+  <div id="root" class="crt"></div>
 
   <script>
     const errbar = document.getElementById('errbar');
@@ -53,8 +116,6 @@
       const s = String(v).trim().toLowerCase();
       return s === "true" || s === "1" || s === "yes" || s === "on";
     }
-
-    // Webdis MGET and fallback GET
     async function webdisMget(keys) {
       try {
         const url = `${WEBDIS_BASE}/MGET/${keys.map(encodeURIComponent).join("/")}.json`;
@@ -63,14 +124,11 @@
         const data = await res.json();
         if (data && Array.isArray(data.MGET)) return data.MGET;
         return [];
-      } catch {
-        return [];
-      }
+      } catch { return []; }
     }
     async function webdisGet(key) {
       try {
         const res = await fetch(`${WEBDIS_BASE}/GET/${encodeURIComponent(key)}.json`, { cache: "no-store" });
-        // Try JSON shape
         try {
           const data = await res.json();
           if (data && data.GET !== undefined) {
@@ -78,21 +136,17 @@
             if (Array.isArray(g) && g.length) return String(g[0]).trim();
             if (g && typeof g === "object" && "value" in g) return String(g.value).trim();
           }
-        } catch { /* fall through */ }
-        // Fallback text
+        } catch { /* fallback */ }
         const txt = await res.text();
         return txt ? String(txt).trim() : null;
-      } catch {
-        return null;
-      }
+      } catch { return null; }
     }
     async function webdisSet(key, value) {
-      try {
-        await fetch(`${WEBDIS_BASE}/SET/${encodeURIComponent(key)}/${encodeURIComponent(value)}.json`, { cache: "no-store" });
-      } catch {}
+      try { await fetch(`${WEBDIS_BASE}/SET/${encodeURIComponent(key)}/${encodeURIComponent(value)}.json`, { cache: "no-store" }); }
+      catch {}
     }
 
-    // ===== Physics model =====
+    // ===== Physics =====
     function createOrbitState() {
       return { r: 145, v: 1.0, theta: 0, mu: 1.0, Cd: 2.2, A: 1.0, m: 1.0 };
     }
@@ -108,46 +162,37 @@
       const gravityAccel = state.mu / (state.r * state.r);
       const inwardAccel = dragAccel + gravityAccel;
 
-      // tangential
       state.v += (gravityAccel - dragAccel) * dt;
-      if (state.v > 10) state.v = 10;
-      if (state.v < 0.1) state.v = 0.1;
+      state.v = Math.max(0.1, Math.min(10, state.v));
 
-      // radial
       state.r -= inwardAccel * dt * state.v * 0.5;
       if (state.r < 40) state.r = 40;
 
-      // angular
       state.theta += (state.v / state.r) * dt;
       return state;
     }
 
     function App() {
-      // State (no sliders; all options from Webdis)
       const [orbit, setOrbit] = useState(createOrbitState());
-      const [fallFactor, setFallFactor] = useState(PHASE_MAP.Phase4); // default to Phase4 if none set
-      const [webdisUp, setWebdisUp] = useState(null);
-
-      // sent flags for layer keys
+      const [fallFactor, setFallFactor] = useState(PHASE_MAP.Phase4);
       const sentLayerFlagsRef = useRef({});
 
-      // Layers / boundaries
       const layers = useMemo(() => ([
-        { name: "Cloud Deck", key: "CloudDeck", r: 140, color: "#facc15" },
-        { name: "Stratosheath", key: "Stratosheath", r: 100, color: "#f97316" },
-        { name: "Red Zone", key: "RedZone", r: 60, color: "#dc2626" },
+        { name: "Cloud Deck", key: "CloudDeck", r: 140, color: "#4cff9a" },
+        { name: "Stratosheath", key: "Stratosheath", r: 100, color: "#55ff88" },
+        { name: "Red Zone", key: "RedZone", r: 60, color: "#66ff77" },
       ]), []);
       const boundaries = useMemo(() =>
         ([ ...layers.map(l => ({ name: l.name, key: l.key, r: l.r })), { name:"Crushdepth", key:"Crushdepth", r:40 } ]
           .sort((a,b) => b.r - a.r)), [layers]);
 
-      // Animation loop: true seconds using RAF; no sim multiplier exposed
+      // Real-time animation (true seconds)
       const rafRef = useRef(null);
       const lastRef = useRef(null);
       useEffect(() => {
         function frame(ts) {
           if (lastRef.current == null) lastRef.current = ts;
-          const dt = (ts - lastRef.current) / 1000; // real seconds
+          const dt = (ts - lastRef.current) / 1000; // seconds
           lastRef.current = ts;
           setOrbit(prev => stepOrbit({ ...prev, mu: fallFactor }, dt, fallFactor));
           rafRef.current = requestAnimationFrame(frame);
@@ -156,12 +201,38 @@
         return () => cancelAnimationFrame(rafRef.current);
       }, [fallFactor]);
 
-      // Current layer & next target
+      // Pick highest truthy phase every second
+      useEffect(() => {
+        let stop = false;
+        async function poll() {
+          try {
+            let vals = await webdisMget(PHASE_KEYS);
+            if (!vals.length) {
+              const arr = await Promise.all(PHASE_KEYS.map(async k => [k, await webdisGet(k)]));
+              vals = arr.map(([, v]) => v);
+            }
+            const active = PHASE_KEYS.filter((k, i) => isTruthy(vals[i]));
+            if (active.length === 0) {
+              setFallFactor(PHASE_MAP.Phase4);
+            } else {
+              const best = active.reduce((acc, k) => (PHASE_MAP[k] > PHASE_MAP[acc] ? k : acc), active[0]);
+              setFallFactor(PHASE_MAP[best]);
+            }
+          } finally {
+            if (!stop) setTimeout(poll, 1000);
+          }
+        }
+        poll();
+        return () => { stop = true; };
+      }, []);
+
+      // Current layer
       const currentLayer = useMemo(() => {
         const found = layers.find(l => orbit.r > l.r);
         return found ? found.name : layers[layers.length - 1].name;
       }, [layers, orbit.r]);
 
+      // Next boundary
       const nextTarget = useMemo(() => {
         for (let i = 0; i < boundaries.length; i++) {
           if (orbit.r > boundaries[i].r) {
@@ -174,7 +245,7 @@
         return null;
       }, [boundaries, orbit.r]);
 
-      // Future path (ship-fixed, core-centered)
+      // Future path (ship-fixed frame)
       const fullPath = useMemo(() => {
         const shipX = 250, shipY = 100;
         const pts = [];
@@ -200,7 +271,7 @@
         return `M 250,100 ${pts.map(p => `L ${p}`).join(" ")}`;
       }, [orbit, fallFactor]);
 
-      // ETA (seconds) — real (no sim factor shown)
+      // Next ETA in true seconds
       const nextEtaSeconds = useMemo(() => {
         if (!nextTarget) return null;
         let s = { ...orbit, mu: fallFactor };
@@ -213,7 +284,7 @@
         return steps >= MAX ? null : t;
       }, [orbit, fallFactor, nextTarget]);
 
-      // All boundaries (list) with each ETA (seconds)
+      // All layer ETAs (true seconds)
       const layerETAs = useMemo(() => {
         return boundaries.map(b => {
           if (orbit.r <= b.r) return { ...b, status: "Threshold Reached", eta: null };
@@ -229,36 +300,7 @@
         });
       }, [boundaries, orbit, fallFactor]);
 
-      // Poll phases from Webdis (highest active wins)
-      useEffect(() => {
-        let stop = false;
-        async function poll() {
-          try {
-            let vals = await webdisMget(PHASE_KEYS);
-            if (!vals.length) {
-              // Fallback GET per key
-              const arr = await Promise.all(PHASE_KEYS.map(async k => [k, await webdisGet(k)]));
-              vals = arr.map(([, v]) => v);
-            }
-            const active = PHASE_KEYS.filter((k, i) => isTruthy(vals[i]));
-            if (active.length === 0) {
-              setFallFactor(PHASE_MAP.Phase4);
-            } else {
-              const best = active.reduce((acc, k) => (PHASE_MAP[k] > PHASE_MAP[acc] ? k : acc), active[0]);
-              setFallFactor(PHASE_MAP[best]);
-            }
-            setWebdisUp(true);
-          } catch {
-            setWebdisUp(false);
-          } finally {
-            if (!stop) setTimeout(poll, 1000);
-          }
-        }
-        poll();
-        return () => { stop = true; };
-      }, []);
-
-      // Emit layer flags (once) to Webdis
+      // Emit layer flags once
       useEffect(() => {
         boundaries.forEach(b => {
           if (orbit.r <= b.r && !sentLayerFlagsRef.current[b.key]) {
@@ -270,39 +312,38 @@
 
       // Draw
       const planetCY = 100 + orbit.r;
-      const rho = atmosphericDensity(orbit.r);
-      const drag = 0.5 * orbit.Cd * (orbit.A / orbit.m) * rho * orbit.v * orbit.v * fallFactor;
+      const rho = (function(r){ const h=Math.max(0,r-40); if(h>100)return 0.0001*Math.exp(-(h-100)/50); if(h>60)return 0.001*Math.exp(-(h-60)/20); return 0.01*Math.exp(-(h-40)/5);})(orbit.r);
+      const drag = 0.5 * 2.2 * (1.0/1.0) * rho * orbit.v * orbit.v * fallFactor;
       const g = fallFactor / (orbit.r * orbit.r);
       const inward = drag + g;
       const vx = 20 * orbit.v;
       const vy = 300 * inward;
 
-      const mono = { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace' };
-
       return (
-        <div className="mono" style={{ display: "grid", placeItems: "center", minHeight: "100vh", background: "#000", color: "#fff" }}>
-          {/* World (kept for situational awareness) */}
-          <svg width="500" height="500" viewBox="0 0 500 500">
+        <div style={{ width: "100%", maxWidth: "1200px", padding: "12px" }}>
+          {/* 2× Orbital display: width/height 1000 with viewBox 500 => doubles visuals */}
+          <svg width="1000" height="1000" viewBox="0 0 500 500">
             <g>
-              <circle cx="250" cy={planetCY} r="40" fill="#1e3a8a" />
+              <circle cx="250" cy={planetCY} r="40" fill="#0c2" />
               {layers.map((l, i) => (
-                <circle key={i} cx="250" cy={planetCY} r={l.r} fill="none" stroke={l.color} strokeWidth="2" strokeOpacity="0.3" />
+                <circle key={i} cx="250" cy={planetCY} r={l.r} fill="none" stroke={l.color} strokeWidth="2" strokeOpacity="0.35" />
               ))}
-              <path d={fullPath} fill="none" stroke="#00ffff" strokeWidth="1" strokeDasharray="3,3" strokeOpacity="0.6" />
+              <path d={fullPath} fill="none" stroke="#7dffbf" strokeWidth="1" strokeDasharray="3,3" strokeOpacity="0.7" />
             </g>
             {/* Ship & HUD vectors */}
-            <circle cx="250" cy="100" r="6" fill="#22c55e" />
-            <line x1="250" y1="100" x2={250 + vx} y2="100" stroke="#60a5fa" strokeWidth="2" />
-            <line x1="250" y1="100" x2="250" y2={100 + vy} stroke="#f87171" strokeWidth="2" />
+            <circle cx="250" cy="100" r="6" fill="#5fff85" />
+            <line x1="250" y1="100" x2={250 + vx} y2="100" stroke="#7dffbf" strokeWidth="2" />
+            <line x1="250" y1="100" x2="250" y2={100 + vy} stroke="#7dffbf" strokeWidth="2" />
           </svg>
 
-          {/* Minimal Readout Panel */}
-          <div className="panel mono">
-            <div className="row"><span className="label">Planet Name: </span><span className="value">Unknown</span></div>
-            <div className="row"><span className="label">Planet Type: </span><span className="value">Unexplored Gas Giant.</span></div>
-            <div className="row"><span className="label">Current Layer: </span><span className="value">{currentLayer}</span></div>
+          {/* Minimal CRT readout */}
+          <div className="panel flicker">
+            <div className="title">ORBITAL STATUS — LINK: ACTIVE</div>
+            <div className="row"><span className="label">Planet Name:</span><span className="value">Unknown</span></div>
+            <div className="row"><span className="label">Planet Type:</span><span className="value">Unexplored Gas Giant.</span></div>
+            <div className="row"><span className="label">Current Layer:</span><span className="value">{currentLayer}</span></div>
 
-            <div className="title">Layer Crossings</div>
+            <div className="title" style={{ marginTop: "10px" }}>Layer Crossings (ETA in seconds)</div>
             <ul className="layers">
               {layerETAs.map((b, idx) => (
                 <li key={idx}>
@@ -316,13 +357,9 @@
               ))}
             </ul>
 
-            <div className="row" style={{ marginTop: 8 }}>
-              <span className="label">Next ETA (seconds): </span>
-              <span className="value">{nextEtaSeconds == null ? "—" : nextEtaSeconds.toFixed(1)}</span>
-            </div>
-
-            <div className="row" style={{ marginTop: 6, opacity: 0.7, fontSize: 12 }}>
-              Webdis: {webdisUp == null ? "…" : webdisUp ? "OK" : "Error"} | Fall Factor: {fallFactor}
+            <div className="row" style={{ marginTop: "8px" }}>
+              <span className="label">Next ETA (seconds):</span>
+              <span className="value">{nextTarget ? (nextEtaSeconds == null ? "—" : nextEtaSeconds.toFixed(1)) : "—"}</span>
             </div>
           </div>
         </div>
