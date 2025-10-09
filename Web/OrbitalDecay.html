@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Orbit Decay UI — Webdis Phases (true seconds)</title>
+  <title>Orbit Decay UI — Webdis Phases (true seconds, fixed path + layer list)</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
@@ -15,7 +15,6 @@
     #errbar { position: fixed; top: 0; left: 0; right: 0; background: #7f1d1d; color: #fff;
               font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
               padding: 6px 10px; display:none; z-index: 9999; }
-    .panel { max-width: 680px; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
     .rawbox { background:#0b0b0b; border:1px solid #222; border-radius:6px; padding:8px; color:#ddd; white-space:pre-wrap; }
   </style>
@@ -41,18 +40,34 @@
   <script type="text/babel" data-presets="react">
     const { useEffect, useMemo, useRef, useState } = React;
 
+    // ===== Webdis config =====
     const WEBDIS_BASE = "http://192.168.30.114:7379";
     const PHASE_KEYS = ["Phase1", "Phase2", "Phase3", "Phase4"];
     const PHASE_MAP  = { Phase1: 490, Phase2: 365, Phase3: 244, Phase4: 182 };
 
-    function createOrbitState() { return { r:145, v:1.0, theta:0, mu:1.0, Cd:2.2, A:1.0, m:1.0 }; }
-    function atmosphericDensity(r){ const h=Math.max(0,r-40); if(h>100)return 0.0001*Math.exp(-(h-100)/50); if(h>60)return 0.001*Math.exp(-(h-60)/20); return 0.01*Math.exp(-(h-40)/5);}
-    function stepOrbit(s,dt,vb){const rho=atmosphericDensity(s.r);const drag=0.5*s.Cd*(s.A/s.m)*rho*s.v*s.v*vb;const g=s.mu/(s.r*s.r);const inward=drag+g;s.v+=(g-drag)*dt;if(s.v>10)s.v=10;if(s.v<0.1)s.v=0.1;s.r-=inward*dt*s.v*0.5;if(s.r<40)s.r=40;s.theta+=s.v/s.r*dt;return s;}
-    function isTruthy(v){if(v==null)return false;const s=String(v).trim().toLowerCase();return["true","1","yes","on"].includes(s);}
+    // ===== Model =====
+    function createOrbitState(){ return { r:145, v:1.0, theta:0, mu:1.0, Cd:2.2, A:1.0, m:1.0 }; }
+    function atmosphericDensity(r){ const h=Math.max(0,r-40); if(h>100) return 0.0001*Math.exp(-(h-100)/50);
+      if(h>60) return 0.001*Math.exp(-(h-60)/20); return 0.01*Math.exp(-(h-40)/5); }
+    function stepOrbit(s,dt,vb){
+      const rho=atmosphericDensity(s.r);
+      const drag=0.5*s.Cd*(s.A/s.m)*rho*s.v*s.v*vb;
+      const g=s.mu/(s.r*s.r);
+      const inward=drag+g;
+      s.v+=(g-drag)*dt;
+      if(s.v>10) s.v=10;
+      if(s.v<0.1) s.v=0.1;
+      s.r-=inward*dt*s.v*0.5;
+      if(s.r<40) s.r=40;
+      s.theta+= (s.v/s.r)*dt;
+      return s;
+    }
+    function isTruthy(v){ if(v==null) return false; const s=String(v).trim().toLowerCase(); return ["true","1","yes","on"].includes(s); }
 
     function App(){
+      // ===== State =====
       const [orbit,setOrbit]=useState(createOrbitState());
-      const [fallFactor,setFallFactor]=useState(PHASE_MAP["Phase4"]);
+      const [fallFactor,setFallFactor]=useState(PHASE_MAP.Phase4);
       const [simRate,setSimRate]=useState(1);
       const [speedSetpoint,setSpeedSetpoint]=useState(1.0);
       const [view,setView]=useState(1);
@@ -65,58 +80,284 @@
       const sentLayerFlagsRef=useRef({});
       const lastTriggerKeyRef=useRef("");
 
+      // True-seconds integrator
       const rafRef=useRef(null), lastRef=useRef(null);
-      useEffect(()=>{function tick(ts){if(lastRef.current==null)lastRef.current=ts;const dt=(ts-lastRef.current)/1000;lastRef.current=ts;const dtsim=dt*simRate;setOrbit(p=>stepOrbit({...p,mu:fallFactor},dtsim,fallFactor));rafRef.current=requestAnimationFrame(tick);}rafRef.current=requestAnimationFrame(tick);return()=>cancelAnimationFrame(rafRef.current);},[fallFactor,simRate]);
+      useEffect(()=>{function tick(ts){
+        if(lastRef.current==null) lastRef.current=ts;
+        const dt=(ts-lastRef.current)/1000; lastRef.current=ts;
+        const dtsim=dt*simRate;
+        setOrbit(p=>stepOrbit({...p,mu:fallFactor},dtsim,fallFactor));
+        rafRef.current=requestAnimationFrame(tick);
+      }
+      rafRef.current=requestAnimationFrame(tick);
+      return()=>cancelAnimationFrame(rafRef.current);},[fallFactor,simRate]);
 
-      const layers=useMemo(()=>[{name:"Cloud Deck",key:"CloudDeck",r:140,color:"#facc15"},{name:"Stratosheath",key:"Stratosheath",r:100,color:"#f97316"},{name:"Red Zone",key:"RedZone",r:60,color:"#dc2626"}],[]);
-      const boundaries=useMemo(()=>[...layers.map(l=>({name:l.name,key:l.key,r:l.r})),{name:"Crushdepth",key:"Crushdepth",r:40}].sort((a,b)=>b.r-a.r),[layers]);
+      // Layers / boundaries
+      const layers=useMemo(()=>[
+        {name:"Cloud Deck", key:"CloudDeck", r:140, color:"#facc15"},
+        {name:"Stratosheath", key:"Stratosheath", r:100, color:"#f97316"},
+        {name:"Red Zone", key:"RedZone", r:60, color:"#dc2626"},
+      ],[]);
+      const boundaries=useMemo(()=>[
+        ...layers.map(l=>({name:l.name,key:l.key,r:l.r})),
+        {name:"Crushdepth", key:"Crushdepth", r:40}
+      ].sort((a,b)=>b.r-a.r),[layers]);
 
+      // Camera / view
       const shipBaseX=250, shipBaseY=100;
-      let shipY=shipBaseY,scale=1,ty=0;if(view===2){shipY=250;ty=shipY-shipBaseY;scale=3;}else if(view===3){shipY=250;ty=shipY-shipBaseY;scale=1;}
+      let shipY=shipBaseY,scale=1,ty=0;
+      if(view===2){shipY=250;ty=shipY-shipBaseY;scale=3;}
+      else if(view===3){shipY=250;ty=shipY-shipBaseY;scale=1;}
       const cam=`translate(0,${ty})${scale!==1?` translate(${shipBaseX},${shipBaseY}) scale(${scale}) translate(${-shipBaseX},${-shipBaseY})`:""}`;
-      const currentLayer=useMemo(()=>layers.find(l=>orbit.r>l.r)?.name??layers[layers.length-1].name,[layers,orbit.r]);
-      const nextTarget=useMemo(()=>{for(let i=0;i<boundaries.length;i++){if(orbit.r>boundaries[i].r){for(let j=i;j<boundaries.length;j++){if(boundaries[j].r<orbit.r)return boundaries[j];}}}if(orbit.r>40)return{ name:"Crushdepth",key:"Crushdepth",r:40};return null;},[boundaries,orbit.r]);
 
-      const fullPath=useMemo(()=>{const pts=[];let s={...orbit,mu:fallFactor};let last=s.theta,rot=0;while(s.r>40&&rot<6){s=stepOrbit({...s},0.03,fallFactor);if(s.theta<last)rot++;last=s.theta;pts.push(`${shipBaseX+s.r*Math.cos(s.theta)},${shipBaseY+s.r*Math.sin(s.theta)}`);}return`M${shipBaseX},${shipBaseY} ${pts.map(p=>`L${p}`).join(" ")}`;},[orbit,fallFactor]);
-      const rho=atmosphericDensity(orbit.r);const drag=0.5*(orbit.Cd*(orbit.A/orbit.m))*rho*orbit.v*orbit.v*fallFactor;const g=fallFactor/(orbit.r*orbit.r);const inward=drag+g;const vx=20*orbit.v;const vy=300*inward;
+      // Current layer / next target
+      const currentLayer=useMemo(()=>layers.find(l=>orbit.r>l.r)?.name ?? layers[layers.length-1].name,[layers,orbit.r]);
+      const nextTarget=useMemo(()=>{
+        for(let i=0;i<boundaries.length;i++){
+          if(orbit.r>boundaries[i].r){
+            for(let j=i;j<boundaries.length;j++){
+              if(boundaries[j].r<orbit.r) return boundaries[j];
+            }
+          }
+        }
+        if(orbit.r>40) return {name:"Crushdepth", key:"Crushdepth", r:40};
+        return null;
+      },[boundaries,orbit.r]);
 
-      const etaSim=useMemo(()=>{if(!nextTarget)return null;let s={...orbit,mu:fallFactor},t=0;while(s.r>nextTarget.r){s=stepOrbit({...s},0.05,fallFactor);t+=0.05;if(t>99999)break;}return t;},[orbit,fallFactor,nextTarget]);
-      const etaReal=etaSim?etaSim/Math.max(simRate,1e-6):null;
-      const periodSim=useMemo(()=>{const a=orbit.v/Math.max(orbit.r,1e-6);return a<=0?null:(2*Math.PI)/a;},[orbit]);
-      const periodReal=periodSim?periodSim/Math.max(simRate,1e-6):null;
+      // ===== Corrected future path (ship-fixed view, core-centered motion)
+      const fullPath=useMemo(()=>{
+        const pts=[];
+        // Ship-local frame at current theta: T (prograde), In (toward core)
+        const r0=orbit.r, th0=orbit.theta;
+        const shipPos = { x: r0*Math.cos(th0), y: r0*Math.sin(th0) };
+        const T  = { x: -Math.sin(th0), y:  Math.cos(th0) };
+        const In = { x: -Math.cos(th0), y: -Math.sin(th0) };
 
-      async function webdisMget(keys){try{const url=`${WEBDIS_BASE}/MGET/${keys.map(encodeURIComponent).join("/")}.json`;const res=await fetch(url,{cache:"no-store"});const text=await res.text();setRawMget(text);const j=JSON.parse(text);if(j.MGET&&Array.isArray(j.MGET))return j.MGET;return[];}catch(e){return[];}}
-      async function webdisGet(k){try{const r=await fetch(`${WEBDIS_BASE}/GET/${encodeURIComponent(k)}.json`,{cache:"no-store"});const t=await r.text();return t||null;}catch{return null;}}
-      useEffect(()=>{let stop=false;async function poll(){try{const vals=await webdisMget(PHASE_KEYS);let reads={},active=[];PHASE_KEYS.forEach((k,i)=>{reads[k]=vals[i]??null;if(isTruthy(vals[i]))active.push(k);});if(!vals.length){const arr=await Promise.all(PHASE_KEYS.map(async k=>[k,await webdisGet(k)]));reads=Object.fromEntries(arr);active=arr.filter(([k,v])=>isTruthy(v)).map(([k])=>k);}setPhaseReads(reads);if(active.length===0){setActivePhase("Phase4");setFallFactor(PHASE_MAP.Phase4);}else{const best=active.reduce((a,b)=>PHASE_MAP[b]>PHASE_MAP[a]?b:a,active[0]);setActivePhase(best);setFallFactor(PHASE_MAP[best]);}setWebdisOk(true);}catch{setWebdisOk(false);}if(!stop)setTimeout(poll,1000);}poll();return()=>stop=true;},[]);
+        let s={...orbit,mu:fallFactor};
+        let lastTheta=s.theta, rotations=0, maxSteps=200000, desiredRot=6;
+
+        while(s.r>40 && rotations<desiredRot && maxSteps-- > 0){
+          s=stepOrbit({...s}, 0.03, fallFactor);
+          if(s.theta < lastTheta) rotations++;
+          lastTheta=s.theta;
+
+          // World position of future point
+          const p = { x: s.r*Math.cos(s.theta), y: s.r*Math.sin(s.theta) };
+          // Relative to current ship position, expressed in (T, In) axes
+          const rel = { x: p.x - shipPos.x, y: p.y - shipPos.y };
+          const xh  = rel.x*T.x + rel.y*T.y;
+          const yh  = rel.x*In.x + rel.y*In.y;
+
+          // Project onto HUD with ship anchored at (shipBaseX, shipBaseY)
+          const px = shipBaseX + xh;
+          const py = shipBaseY + yh;
+          pts.push(`${px},${py}`);
+        }
+        return `M ${shipBaseX},${shipBaseY} ${pts.map(p=>`L ${p}`).join(" ")}`;
+      },[orbit,fallFactor]);
+
+      // HUD vectors/readouts
+      const rho=atmosphericDensity(orbit.r);
+      const drag=0.5*(orbit.Cd*(orbit.A/orbit.m))*rho*orbit.v*orbit.v*fallFactor;
+      const g=fallFactor/(orbit.r*orbit.r);
+      const inward=drag+g;
+      const vx=20*orbit.v, vy=300*inward;
+
+      // ETAs
+      const etaSim=useMemo(()=>{
+        if(!nextTarget) return null;
+        let s={...orbit,mu:fallFactor}, t=0, dt=0.05, steps=0, MAX=200000;
+        while(s.r>nextTarget.r && steps++<MAX){ s=stepOrbit({...s},dt,fallFactor); t+=dt; if(s.r<=40) break; }
+        return steps>=MAX ? null : t;
+      },[orbit,fallFactor,nextTarget]);
+      const etaReal = etaSim==null ? null : etaSim/Math.max(simRate,1e-6);
+
+      // Orbital period
+      const periodSim=useMemo(()=>{ const ang=orbit.v/Math.max(orbit.r,1e-6); return ang<=0?null:(2*Math.PI)/ang; },[orbit.v,orbit.r]);
+      const periodReal = periodSim==null ? null : periodSim/Math.max(simRate,1e-6);
+
+      // All boundaries list + ETAs each
+      const allBoundaries=useMemo(()=>[
+        ...layers.map(l=>({name:l.name,key:l.key,r:l.r})),
+        {name:"Crushdepth", key:"Crushdepth", r:40}
+      ].sort((a,b)=>b.r-a.r),[layers]);
+
+      const layerETAs=useMemo(()=>{
+        return allBoundaries.map(b=>{
+          if(orbit.r<=b.r) return {...b,status:"Threshold Reached",etaSim:null,etaReal:null};
+          let s={...orbit,mu:fallFactor}, t=0, dt=0.05, steps=0, MAX=200000;
+          while(s.r>b.r && steps++<MAX){ s=stepOrbit({...s},dt,fallFactor); t+=dt; if(s.r<=40) break; }
+          if(steps>=MAX) return {...b,status:"—",etaSim:null,etaReal:null};
+          const sim=t, real=sim/Math.max(simRate,1e-6);
+          return {...b,status:"ETA",etaSim:sim,etaReal:real};
+        });
+      },[allBoundaries,orbit,fallFactor,simRate]);
+
+      // Webdis helpers
+      async function webdisMget(keys){
+        try{
+          const url=`${WEBDIS_BASE}/MGET/${keys.map(encodeURIComponent).join("/")}.json`;
+          const res=await fetch(url,{cache:"no-store"});
+          const text=await res.text(); setRawMget(text);
+          const j=JSON.parse(text);
+          if(j.MGET && Array.isArray(j.MGET)) return j.MGET;
+          return [];
+        }catch{ return []; }
+      }
+      async function webdisGet(k){
+        try{
+          const r=await fetch(`${WEBDIS_BASE}/GET/${encodeURIComponent(k)}.json`,{cache:"no-store"});
+          // try json first
+          try {
+            const j=await r.json();
+            if(j && j.GET !== undefined){
+              const g=j.GET;
+              if(Array.isArray(g) && g.length) return String(g[0]).trim();
+              if(g && typeof g==='object' && 'value' in g) return String(g.value).trim();
+            }
+          } catch { /* fall through */ }
+          const t=await r.text();
+          return t||null;
+        }catch{ return null; }
+      }
+      async function webdisSet(k,v){
+        try{
+          const res=await fetch(`${WEBDIS_BASE}/SET/${encodeURIComponent(k)}/${encodeURIComponent(v)}.json`,{cache:"no-store"});
+          setWebdisOk(res.ok);
+        }catch{ setWebdisOk(false); }
+      }
+
+      // Optional PING
+      useEffect(()=>{(async()=>{
+        try{ const res=await fetch(`${WEBDIS_BASE}/PING.json`,{cache:'no-store'}); setWebdisOk(res.ok);}
+        catch{ setWebdisOk(false); }
+      })();},[]);
+
+      // Poll phases: prefer MGET, fallback to GET per-key; pick highest mapped factor among truthy
+      useEffect(()=>{
+        let stop=false;
+        async function poll(){
+          try{
+            const vals=await webdisMget(PHASE_KEYS);
+            let reads={}, active=[];
+            PHASE_KEYS.forEach((k,i)=>{ reads[k]=vals[i]??null; if(isTruthy(vals[i])) active.push(k); });
+
+            if(!vals.length){
+              const arr=await Promise.all(PHASE_KEYS.map(async k=>[k,await webdisGet(k)]));
+              reads=Object.fromEntries(arr);
+              active=arr.filter(([k,v])=>isTruthy(v)).map(([k])=>k);
+            }
+
+            setPhaseReads(reads);
+            if(active.length===0){ setActivePhase("Phase4"); setFallFactor(PHASE_MAP.Phase4); }
+            else{
+              const best=active.reduce((a,b)=>PHASE_MAP[b]>PHASE_MAP[a]?b:a,active[0]);
+              setActivePhase(best); setFallFactor(PHASE_MAP[best]);
+            }
+            setWebdisOk(true);
+          }catch{ setWebdisOk(false); }
+          if(!stop) setTimeout(poll,1000);
+        }
+        poll();
+        return()=>{stop=true;};
+      },[]);
+
+      // Mark layer flags once when passed
+      useEffect(()=>{
+        boundaries.forEach(b=>{
+          if(orbit.r<=b.r && !sentLayerFlagsRef.current[b.key]){
+            sentLayerFlagsRef.current[b.key]=true;
+            webdisSet(b.key,"true");
+          }
+        });
+      },[boundaries,orbit.r]);
+
+      // Webhook on crossing
+      useEffect(()=>{
+        if(!nextTarget) return;
+        const key = `${nextTarget.name}:${nextTarget.r.toFixed(2)}`;
+        if(lastTriggerKeyRef.current===key) return;
+        if(orbit.r<=nextTarget.r){
+          if(webhookEnabled && webhookUrl){
+            try{
+              fetch(webhookUrl,{
+                method:"POST",
+                headers:{ "Content-Type":"application/json" },
+                body:JSON.stringify({
+                  event: nextTarget.name==="Crushdepth" ? "crushdepth-reached" : "layer-transition",
+                  target: nextTarget,
+                  state: { r:orbit.r, v:orbit.v, theta:orbit.theta },
+                  at: new Date().toISOString(),
+                }),
+              }).catch(()=>{});
+            }catch{}
+          }
+          lastTriggerKeyRef.current=key;
+        }
+      },[orbit.r,nextTarget,webhookEnabled,webhookUrl]);
 
       const mono={fontFamily:'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace'};
+
       return (
         <div style={{background:"#000",color:"#fff",height:"100vh",display:"grid",placeItems:"center"}}>
           <div style={{display:"flex",flexDirection:"column",alignItems:"center",background:"#000",...mono}}>
+            {/* Views */}
             <div style={{marginBottom:8,display:"flex",gap:8}}>
               <button onClick={()=>setView(1)}>View 1</button>
               <button onClick={()=>setView(2)}>View 2</button>
               <button onClick={()=>setView(3)}>View 3</button>
             </div>
 
+            {/* World */}
             <svg width="500" height="500" viewBox="0 0 500 500" style={{border:"1px solid #222",background:"#000"}}>
               <g transform={cam}>
+                {/* Core & layers centered at current planet center */}
                 <circle cx="250" cy={100+orbit.r} r="40" fill="#1e3a8a" />
-                {layers.map((l,i)=><circle key={i} cx="250" cy={100+orbit.r} r={l.r} fill="none" stroke={l.color} strokeWidth="2" strokeOpacity="0.3"/>)}
-                <path d={fullPath} fill="none" stroke="#00ffff" strokeWidth="1" strokeDasharray="3,3" strokeOpacity="0.6"/>
+                {layers.map((l,i)=>(
+                  <circle key={i} cx="250" cy={100+orbit.r} r={l.r} fill="none" stroke={l.color} strokeWidth="2" strokeOpacity="0.3" />
+                ))}
+                {/* Future path (ship anchored, core-centric motion) */}
+                <path d={fullPath} fill="none" stroke="#00ffff" strokeWidth="1" strokeDasharray="3,3" strokeOpacity="0.6" />
               </g>
+
+              {/* Ship & vectors (HUD-fixed) */}
               <circle cx="250" cy="100" r="6" fill="#22c55e"/>
               <line x1="250" y1="100" x2={250+vx} y2="100" stroke="#60a5fa" strokeWidth="2"/>
               <line x1="250" y1="100" x2="250" y2={100+vy} stroke="#f87171" strokeWidth="2"/>
             </svg>
 
+            {/* Readouts */}
             <div style={{marginTop:12,fontSize:16,textAlign:"center",maxWidth:620}}>
               <div>Current Layer: <strong>{currentLayer}</strong></div>
               <div>Radius: <strong>{orbit.r.toFixed(1)}</strong> | Velocity: <strong>{orbit.v.toFixed(3)}</strong></div>
               <div>Fall Factor: <strong>{fallFactor}</strong> ({activePhase}) | Webdis: <strong>{webdisOk==null?"…":webdisOk?"OK":"Error"}</strong></div>
               <div>Orbital Period — sim: <strong>{periodSim?periodSim.toFixed(1):"—"}s</strong> | real: <strong>{periodReal?periodReal.toFixed(1):"—"}s</strong></div>
-              <div>Next: {nextTarget?<>{nextTarget.name}@r={nextTarget.r} ETA(sim):{etaSim?etaSim.toFixed(1):"—"}s real:{etaReal?etaReal.toFixed(1):"—"}s</>:<span>At crushdepth</span>}</div>
+              <div>
+                {nextTarget
+                  ? <>Next: <strong>{nextTarget.name}</strong> @ r={nextTarget.r} | ETA(sim): <strong>{etaSim?etaSim.toFixed(1):"—"}s</strong> | real: <strong>{etaReal?etaReal.toFixed(1):"—"}s</strong></>
+                  : <span>At crushdepth</span>}
+              </div>
 
+              {/* Layer Crossings list (restored) */}
+              <div style={{ marginTop: 8, textAlign: "left", marginInline: "auto", width: 440 }}>
+                <div style={{ opacity: 0.9, marginBottom: 4 }}>Layer Crossings:</div>
+                <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+                  {layerETAs.map((b, idx) => (
+                    <li key={idx} style={{ display: "flex", justifyContent: "space-between", padding: "2px 0" }}>
+                      <span>{b.name}</span>
+                      {b.status === "Threshold Reached" ? (
+                        <span>Threshold Reached</span>
+                      ) : b.status === "—" ? (
+                        <span>—</span>
+                      ) : (
+                        <span>sim: {b.etaSim.toFixed(1)}s | real: {b.etaReal.toFixed(1)}s</span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+
+              {/* Debug: Phase reads + raw MGET */}
               <div style={{marginTop:10,textAlign:"left"}}>
                 <div style={{marginBottom:4,opacity:0.85}}>Phase reads:</div>
                 <div className="rawbox mono">
@@ -126,13 +367,45 @@
                 <div className="rawbox mono">{rawMget||"—"}</div>
               </div>
             </div>
+
+            {/* Controls */}
+            <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
+              <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                <label htmlFor="simRate" style={{ width: 110 }}>Sim Rate</label>
+                <input id="simRate" type="range" min="0.1" max="10" step="0.1" value={simRate}
+                       onChange={(e)=>setSimRate(parseFloat(e.target.value))} style={{ width: 280 }} />
+                <span style={{ minWidth: 60, textAlign: "right" }}>{simRate.toFixed(1)}×</span>
+              </div>
+
+              <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                <label htmlFor="speedSetpoint" style={{ width: 110 }}>Orbital Speed</label>
+                <input id="speedSetpoint" type="range" min="0.1" max="10" step="0.1" value={speedSetpoint}
+                       onChange={(e)=>setSpeedSetpoint(parseFloat(e.target.value))} style={{ width: 280 }} />
+                <button onClick={()=>setOrbit(p=>({...p, v:speedSetpoint}))}
+                        style={{ padding:"4px 10px", background:"#111", border:"1px solid #333", color:"#fff", borderRadius:6 }}>
+                  Apply
+                </button>
+                <span style={{ minWidth: 60, textAlign: "right" }}>{speedSetpoint.toFixed(1)}</span>
+              </div>
+
+              {/* Webhook controls */}
+              <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                <label htmlFor="webhookUrl" style={{ width: 110 }}>Webhook URL</label>
+                <input id="webhookUrl" type="text" placeholder="https://example.com/hook"
+                       value={webhookUrl} onChange={(e)=>setWebhookUrl(e.target.value)}
+                       style={{ width: 280, padding: 4, background: '#0b0b0b', border: '1px solid #333', color: '#fff', borderRadius: 6 }} />
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <input type="checkbox" checked={webhookEnabled} onChange={(e)=>setWebhookEnabled(e.target.checked)} /> Enable
+                </label>
+              </div>
+            </div>
           </div>
         </div>
       );
     }
 
-    const root=ReactDOM.createRoot(document.getElementById('root'));
-    root.render(<App/>);
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
   </script>
 </body>
 </html>
