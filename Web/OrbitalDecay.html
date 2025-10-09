@@ -1,377 +1,60 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <title>Orbit HUD — CRT Green (Side Panel + Scaled Viewport)</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
+// Layer edges (you already have these constants)
+const CORE_R = 38;
+const RED_ZONE_R = 63;   // (was 60, +5%)
+const STRATO_R = 100;
+const CLOUD_R  = 140;
 
-  <!-- React + Babel for local run -->
-  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
-  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+// Returns a smoothly increasing density as we go inward (smaller r)
+// with sharper growth in the Red Zone and a final spike near CORE_R.
+function atmosphericDensity(r) {
+  const h = Math.max(0, r - CORE_R); // “altitude” above crushdepth
 
-  <!-- CRT green terminal font -->
-  <link href="https://fonts.googleapis.com/css2?family=VT323&display=swap" rel="stylesheet">
+  // Piecewise shapes tuned for “steeper inside Red Zone”
+  if (r > CLOUD_R) {
+    // very thin
+    return 0.00005 * Math.exp(-(h - (CLOUD_R - CORE_R)) / 70);
+  } else if (r > STRATO_R) {
+    // Stratosheath: moderate
+    return 0.0005 * Math.exp(-(h - (STRATO_R - CORE_R)) / 35);
+  } else if (r > RED_ZONE_R) {
+    // Upper transition toward Red Zone
+    return 0.002 * Math.exp(-(h - (RED_ZONE_R - CORE_R)) / 18);
+  } else {
+    // RED ZONE: steep ramp + final spike near CORE_R
+    const base = 0.01 * Math.exp(-(h) / 7);      // sharp growth
+    const spike = 0.02 * Math.exp(-h / 3);       // extra near crushdepth
+    return base + spike;
+  }
+}
 
-  <style>
-    :root {
-      --crt-green: #5fff85;
-      --crt-dim: #2a4;
-      --bg: #000000;
-    }
-    html, body { margin: 0; height: 100%; background: var(--bg); }
-    body { color: var(--crt-green); font-family: 'VT323', ui-monospace, monospace; }
+// Optional extra multiplicative factor for drag that emphasizes layers.
+// Keeps the old “special dropoff” feel without breaking geometry.
+function dragMultiplier(r) {
+  if (r <= CORE_R + 8) return 4.0;       // close to crushdepth: strongest
+  if (r <= RED_ZONE_R) return 3.2;       // Red Zone: strong
+  if (r <= STRATO_R)  return 1.6;        // Stratosheath: moderate
+  return 1.0;                             // Above Cloud Deck: light
+}
 
-    .crt {
-      position: relative;
-      min-height: 100vh;
-      display: grid;
-      place-items: center;
-      background: var(--bg);
-      overflow: hidden;
-    }
-    .crt::before {
-      content: "";
-      position: absolute; inset: 0;
-      background: repeating-linear-gradient(
-        to bottom,
-        rgba(95,255,133,0.06) 0px,
-        rgba(95,255,133,0.06) 2px,
-        rgba(0,0,0,0) 3px,
-        rgba(0,0,0,0) 4px
-      );
-      pointer-events: none;
-      mix-blend-mode: screen;
-      opacity: 0.45;
-    }
-    .crt::after {
-      content: "";
-      position: absolute; inset: 0;
-      background:
-        radial-gradient(circle at 50% 50%, rgba(0,0,0,0) 60%, rgba(0,0,0,0.35) 85%),
-        linear-gradient(to bottom, rgba(255,255,255,0.03), rgba(0,0,0,0) 40%, rgba(255,255,255,0.02) 60%, rgba(0,0,0,0.1));
-      pointer-events: none;
-      mix-blend-mode: multiply;
-    }
-    .flicker {
-      animation: flicker 2.5s infinite steps(60);
-      text-shadow: 0 0 6px rgba(95,255,133,0.6), 0 0 24px rgba(95,255,133,0.25);
-    }
-    @keyframes flicker {
-      0%, 19%, 21%, 23%, 80%, 100% { opacity: 1; }
-      20%, 22% { opacity: 0.95; }
-      81% { opacity: 0.98; }
-    }
+function stepOrbit(state, dt, velocityBoost) {
+  const rho = atmosphericDensity(state.r);
+  const layerBoost = dragMultiplier(state.r);  // NEW
+  const dragAccel = 0.5 * state.Cd * (state.A / state.m) * rho * state.v * state.v
+                    * velocityBoost * layerBoost; // emphasize per-layer
 
-    /* Two-column layout: left = panel, right = viewport */
-    .wrap {
-      width: 100%;
-      max-width: 1400px;
-      display: flex;
-      gap: 16px;
-      align-items: flex-start;
-      padding: 14px;
-    }
+  const gravityAccel = state.mu / (state.r * state.r);
+  const inwardAccel = dragAccel + gravityAccel;
 
-    .panel {
-      flex: 0 0 480px;
-      border: 1px solid var(--crt-dim);
-      background: rgba(0,0,0,0.75);
-      padding: 10px 14px;
-    }
-    .title { font-size: 26px; margin-bottom: 8px; }
-    .row { font-size: 22px; display: flex; gap: 6px; margin: 6px 0; }
-    .label { opacity: 0.85; }
-    .value { font-weight: 700; }
-    ul.layers { list-style:none; padding:0; margin: 8px 0 0 0; }
-    ul.layers li { display:flex; justify-content:space-between; padding: 3px 0; font-size: 20px; }
+  // tangential evolution
+  state.v += (gravityAccel - dragAccel) * dt;
+  if (state.v > 10) state.v = 10;
+  if (state.v < 0.1) state.v = 0.1;
 
-    /* Viewport (shrink to 75% of previous 1000×1000 => 750×750) */
-    .viewport {
-      border: 1px solid var(--crt-dim);
-      background: #000;
-      box-shadow: 0 0 20px rgba(95,255,133,0.2) inset;
-    }
+  // radial decay (inward)
+  state.r -= inwardAccel * dt * state.v * 0.5;
+  if (state.r < CORE_R) state.r = CORE_R;
 
-    #errbar {
-      position: fixed; top: 0; left: 0; right: 0;
-      background: #083; color: #caffda; padding: 6px 10px;
-      display:none; z-index: 9999; border-bottom: 1px solid var(--crt-dim);
-      font-family: 'VT323', ui-monospace, monospace;
-    }
-  </style>
-</head>
-<body>
-  <div id="errbar"></div>
-  <div id="root" class="crt"></div>
-
-  <script>
-    const errbar = document.getElementById('errbar');
-    window.addEventListener('error', (e) => {
-      errbar.style.display = 'block';
-      errbar.textContent = 'Runtime error: ' + (e.message || e.error);
-      console.error(e.error || e.message, e);
-    });
-    window.addEventListener('unhandledrejection', (e) => {
-      errbar.style.display = 'block';
-      errbar.textContent = 'Unhandled promise rejection: ' + (e.reason && e.reason.message ? e.reason.message : e.reason);
-      console.error(e.reason);
-    });
-  </script>
-
-  <script type="text/babel" data-presets="react">
-    const { useEffect, useMemo, useRef, useState } = React;
-
-    // ===== Webdis config =====
-    const WEBDIS_BASE = "http://192.168.30.114:7379";
-    const PHASE_KEYS = ["Phase1", "Phase2", "Phase3", "Phase4"];
-    const PHASE_MAP  = { Phase1: 490, Phase2: 365, Phase3: 244, Phase4: 182 }; // highest active wins
-
-    // ===== Helpers =====
-    function isTruthy(v) {
-      if (v == null) return false;
-      const s = String(v).trim().toLowerCase();
-      return s === "true" || s === "1" || s === "yes" || s === "on";
-    }
-    async function webdisMget(keys) {
-      try {
-        const url = `${WEBDIS_BASE}/MGET/${keys.map(encodeURIComponent).join("/")}.json`;
-        const res = await fetch(url, { cache: "no-store" });
-        if (!res.ok) return [];
-        const data = await res.json();
-        if (data && Array.isArray(data.MGET)) return data.MGET;
-        return [];
-      } catch { return []; }
-    }
-    async function webdisGet(key) {
-      try {
-        const res = await fetch(`${WEBDIS_BASE}/GET/${encodeURIComponent(key)}.json`, { cache: "no-store" });
-        try {
-          const data = await res.json();
-          if (data && data.GET !== undefined) {
-            const g = data.GET;
-            if (Array.isArray(g) && g.length) return String(g[0]).trim();
-            if (g && typeof g === "object" && "value" in g) return String(g.value).trim();
-          }
-        } catch {}
-        const txt = await res.text();
-        return txt ? String(txt).trim() : null;
-      } catch { return null; }
-    }
-    async function webdisSet(key, value) {
-      try { await fetch(`${WEBDIS_BASE}/SET/${encodeURIComponent(key)}/${encodeURIComponent(value)}.json`, { cache: "no-store" }); }
-      catch {}
-    }
-
-    // ===== Physics =====
-    function createOrbitState() {
-      return { r: 145, v: 1.0, theta: 0, mu: 1.0, Cd: 2.2, A: 1.0, m: 1.0 };
-    }
-    function atmosphericDensity(r) {
-      const h = Math.max(0, r - 40);
-      if (h > 100) return 0.0001 * Math.exp(-(h - 100) / 50);
-      if (h > 60)  return 0.001  * Math.exp(-(h - 60) / 20);
-      return 0.01 * Math.exp(-(h - 40) / 5);
-    }
-    function stepOrbit(state, dt, velocityBoost) {
-      const rho = atmosphericDensity(state.r);
-      const dragAccel = 0.5 * state.Cd * (state.A / state.m) * rho * state.v * state.v * velocityBoost;
-      const gravityAccel = state.mu / (state.r * state.r);
-      const inwardAccel = dragAccel + gravityAccel;
-
-      state.v += (gravityAccel - dragAccel) * dt;
-      state.v = Math.max(0.1, Math.min(10, state.v));
-
-      state.r -= inwardAccel * dt * state.v * 0.5;
-      if (state.r < 40) state.r = 40;
-
-      state.theta += (state.v / state.r) * dt;
-      return state;
-    }
-
-    function App() {
-      const [orbit, setOrbit] = useState(createOrbitState());
-      const [fallFactor, setFallFactor] = useState(PHASE_MAP.Phase4);
-      const sentLayerFlagsRef = useRef({});
-
-      const layers = useMemo(() => ([
-        { name: "Cloud Deck", key: "CloudDeck", r: 140, color: "#4cff9a" },
-        { name: "Stratosheath", key: "Stratosheath", r: 100, color: "#55ff88" },
-        { name: "Red Zone", key: "RedZone", r: 60, color: "#66ff77" },
-      ]), []);
-      const boundaries = useMemo(() =>
-        ([ ...layers.map(l => ({ name: l.name, key: l.key, r: l.r })), { name:"Crushdepth", key:"Crushdepth", r:40 } ]
-          .sort((a,b) => b.r - a.r)), [layers]);
-
-      // Real-time animation (true seconds)
-      const rafRef = useRef(null);
-      const lastRef = useRef(null);
-      useEffect(() => {
-        function frame(ts) {
-          if (lastRef.current == null) lastRef.current = ts;
-          const dt = (ts - lastRef.current) / 1000; // seconds
-          lastRef.current = ts;
-          setOrbit(prev => stepOrbit({ ...prev, mu: fallFactor }, dt, fallFactor));
-          rafRef.current = requestAnimationFrame(frame);
-        }
-        rafRef.current = requestAnimationFrame(frame);
-        return () => cancelAnimationFrame(rafRef.current);
-      }, [fallFactor]);
-
-      // Pick highest truthy phase every second
-      useEffect(() => {
-        let stop = false;
-        async function poll() {
-          try {
-            let vals = await webdisMget(PHASE_KEYS);
-            if (!vals.length) {
-              const arr = await Promise.all(PHASE_KEYS.map(async k => [k, await webdisGet(k)]));
-              vals = arr.map(([, v]) => v);
-            }
-            const active = PHASE_KEYS.filter((k, i) => isTruthy(vals[i]));
-            if (active.length === 0) {
-              setFallFactor(PHASE_MAP.Phase4);
-            } else {
-              const best = active.reduce((acc, k) => (PHASE_MAP[k] > PHASE_MAP[acc] ? k : acc), active[0]);
-              setFallFactor(PHASE_MAP[best]);
-            }
-          } finally {
-            if (!stop) setTimeout(poll, 1000);
-          }
-        }
-        poll();
-        return () => { stop = true; };
-      }, []);
-
-      // Current layer
-      const currentLayer = useMemo(() => {
-        const found = layers.find(l => orbit.r > l.r);
-        return found ? found.name : layers[layers.length - 1].name;
-      }, [layers, orbit.r]);
-
-      // Next boundary
-      const nextTarget = useMemo(() => {
-        for (let i = 0; i < boundaries.length; i++) {
-          if (orbit.r > boundaries[i].r) {
-            for (let j = i; j < boundaries.length; j++) {
-              if (boundaries[j].r < orbit.r) return boundaries[j];
-            }
-          }
-        }
-        if (orbit.r > 40) return { name: "Crushdepth", key: "Crushdepth", r: 40 };
-        return null;
-      }, [boundaries, orbit.r]);
-
-      // Future path (ship-fixed frame)
-      const fullPath = useMemo(() => {
-        const shipX = 250, shipY = 100;
-        const pts = [];
-        const r0 = orbit.r, th0 = orbit.theta;
-        const shipPos = { x: r0 * Math.cos(th0), y: r0 * Math.sin(th0) };
-        const T  = { x: -Math.sin(th0), y:  Math.cos(th0) };
-        const In = { x: -Math.cos(th0), y: -Math.sin(th0) };
-
-        let s = { ...orbit, mu: fallFactor };
-        let lastTheta = s.theta, rotations = 0, desired = 6, steps = 0, MAX = 200000;
-
-        while (s.r > 40 && rotations < desired && steps++ < MAX) {
-          s = stepOrbit({ ...s }, 0.03, fallFactor);
-          if (s.theta < lastTheta) rotations++;
-          lastTheta = s.theta;
-
-          const p = { x: s.r * Math.cos(s.theta), y: s.r * Math.sin(s.theta) };
-          const rel = { x: p.x - shipPos.x, y: p.y - shipPos.y };
-          const xh  = rel.x * T.x + rel.y * T.y;
-          const yh  = rel.x * In.x + rel.y * In.y;
-          pts.push(`${shipX + xh},${shipY + yh}`);
-        }
-        return `M 250,100 ${pts.map(p => `L ${p}`).join(" ")}`;
-      }, [orbit, fallFactor]);
-
-      // All layer ETAs (true seconds)
-      const layerETAs = useMemo(() => {
-        return boundaries.map(b => {
-          if (orbit.r <= b.r) return { ...b, status: "Threshold Reached", eta: null };
-          let s = { ...orbit, mu: fallFactor };
-          let t = 0, dt = 0.05, steps = 0, MAX = 200000;
-          while (s.r > b.r && steps++ < MAX) {
-            s = stepOrbit({ ...s }, dt, fallFactor);
-            t += dt;
-            if (s.r <= 40) break;
-          }
-          if (steps >= MAX) return { ...b, status: "—", eta: null };
-          return { ...b, status: "ETA", eta: t };
-        });
-      }, [boundaries, orbit, fallFactor]);
-
-      // Emit layer flags once
-      useEffect(() => {
-        boundaries.forEach(b => {
-          if (orbit.r <= b.r && !sentLayerFlagsRef.current[b.key]) {
-            sentLayerFlagsRef.current[b.key] = true;
-            webdisSet(b.key, "true");
-          }
-        });
-      }, [boundaries, orbit.r]);
-
-      // Draw
-      const planetCY = 100 + orbit.r;
-      const rho = (function(r){ const h=Math.max(0,r-40); if(h>100)return 0.0001*Math.exp(-(h-100)/50); if(h>60)return 0.001*Math.exp(-(h-60)/20); return 0.01*Math.exp(-(h-40)/5);})(orbit.r);
-      const drag = 0.5 * 2.2 * (1.0/1.0) * rho * orbit.v * orbit.v * fallFactor;
-      const g = fallFactor / (orbit.r * orbit.r);
-      const inward = drag + g;
-      const vx = 20 * orbit.v;
-      const vy = 300 * inward;
-
-      // Scale scene by 1.25x about the center to compensate for smaller viewport
-      const sceneScale = "translate(250,250) scale(1.25) translate(-250,-250)";
-
-      return (
-        <div className="wrap">
-          {/* Left: CRT readout */}
-          <div className="panel flicker">
-            <div className="title">ORBITAL STATUS — LINK: ACTIVE</div>
-            <div className="row"><span className="label">Planet Name:</span><span className="value">Unknown</span></div>
-            <div className="row"><span className="label">Planet Type:</span><span className="value">Unexplored Gas Giant.</span></div>
-            <div className="row"><span className="label">Current Layer:</span><span className="value">{currentLayer}</span></div>
-
-            <div className="title" style={{ marginTop: 10 }}>Layer Crossings (ETA in seconds)</div>
-            <ul className="layers">
-              {layerETAs.map((b, idx) => (
-                <li key={idx}>
-                  <span>{b.name}</span>
-                  {b.status === "Threshold Reached"
-                    ? <span>Threshold Reached</span>
-                    : b.status === "—"
-                      ? <span>—</span>
-                      : <span>{b.eta.toFixed(1)}s</span>}
-                </li>
-              ))}
-            </ul>
-          </div>
-
-          {/* Right: Viewport (shrunk to 750×750), contents scaled 1.25× */}
-          <svg className="viewport" width="750" height="750" viewBox="0 0 500 500">
-            <g transform={sceneScale}>
-              <g>
-                <circle cx="250" cy={planetCY} r="40" fill="#0c2" />
-                {layers.map((l, i) => (
-                  <circle key={i} cx="250" cy={planetCY} r={l.r} fill="none" stroke={l.color} strokeWidth="2" strokeOpacity="0.35" />
-                ))}
-                <path d={fullPath} fill="none" stroke="#7dffbf" strokeWidth="1" strokeDasharray="3,3" strokeOpacity="0.7" />
-              </g>
-              {/* Ship & HUD vectors */}
-              <circle cx="250" cy="100" r="6" fill="#5fff85" />
-              <line x1="250" y1="100" x2={250 + vx} y2="100" stroke="#7dffbf" strokeWidth="2" />
-              <line x1="250" y1="100" x2="250" y2={100 + vy} stroke="#7dffbf" strokeWidth="2" />
-            </g>
-          </svg>
-        </div>
-      );
-    }
-
-    const root = ReactDOM.createRoot(document.getElementById('root'));
-    root.render(<App />);
-  </script>
-</body>
-</html>
+  // angular motion
+  state.theta += (state.v / state.r) * dt;
+  return state;
+}
