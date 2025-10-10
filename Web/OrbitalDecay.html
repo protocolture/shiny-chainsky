@@ -168,6 +168,17 @@
       try { await fetch(`${WEBDIS_BASE}/SET/${encodeURIComponent(key)}/${encodeURIComponent(value)}.json`, { cache: "no-store" }); } catch {}
     }
 
+    // Batch set: /MSET/k1/v1/k2/v2/...
+    async function webdisMset(kvObj) {
+      try {
+        const parts = [];
+        for (const [k, v] of Object.entries(kvObj)) {
+          parts.push(encodeURIComponent(k), encodeURIComponent(v));
+        }
+        await fetch(`${WEBDIS_BASE}/MSET/${parts.join("/")}.json`, { cache: "no-store" });
+      } catch {}
+    }
+
     // === Restored Red Zone dropoff ===
     function atmosphericDensity(r) {
       const h = Math.max(0, r - CORE_R);
@@ -208,7 +219,6 @@
     function App() {
       const [orbit, setOrbit] = useState({ r:145, v:1, theta:0, mu:1, Cd:2.2, A:1, m:1 });
       const [fallFactor, setFallFactor] = useState(PHASE_MAP.Phase4);
-      const sentFlags = useRef({});
 
       const shipBaseX = 250;
       const shipBaseY = 100;
@@ -220,7 +230,7 @@
       ]), []);
       const boundaries = useMemo(() => ([ ...layers, { name:"Crushdepth", key:"Crushdepth", r:CORE_R } ]), [layers]);
 
-      // poll phases
+      // Phase polling → set fallFactor
       useEffect(() => {
         let stop = false;
         async function poll() {
@@ -239,28 +249,38 @@
         return ()=>{stop=true};
       }, []);
 
-      // real-time integration
+      // RAF integration + EVERY-TICK Webdis layer flags (via MSET)
       useEffect(() => {
         let raf; let last;
         function frame(ts){
           if(!last) last=ts;
           const dt=(ts-last)/1000; last=ts;
-          setOrbit(p=>stepOrbit({...p,mu:fallFactor},dt,fallFactor));
+
+          // Predict next state first so flags match what will render next
+          const next = stepOrbit({ ...orbit, mu:fallFactor }, dt, fallFactor);
+
+          // Compute booleans from next.r
+          const cloud = next.r <= CLOUD_R;
+          const strato = next.r <= STRATO_R;
+          const red = next.r <= RED_ZONE_R;
+          const crush = next.r <= CORE_R;
+
+          // Write ALL FOUR every tick in one request
+          webdisMset({
+            CloudDeck:    cloud ? "true" : "false",
+            Stratosheath: strato ? "true" : "false",
+            RedZone:      red ? "true" : "false",
+            Crushdepth:   crush ? "true" : "false",
+          });
+
+          // Commit state
+          setOrbit(next);
+
           raf=requestAnimationFrame(frame);
         }
         raf=requestAnimationFrame(frame);
         return ()=>cancelAnimationFrame(raf);
-      }, [fallFactor]);
-
-      // set layer flags
-      useEffect(() => {
-        boundaries.forEach(b=>{
-          if(orbit.r <= b.r && !sentFlags.current[b.key]){
-            sentFlags.current[b.key] = true;
-            webdisSet(b.key, "true");
-          }
-        });
-      }, [orbit.r, boundaries]);
+      }, [orbit, fallFactor]); // orbit in deps ensures fresh state in closure
 
       const currentLayer = useMemo(()=>{
         const found = layers.find(l=>orbit.r > l.r);

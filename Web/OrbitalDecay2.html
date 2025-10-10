@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Orbit HUD — CRT Palette (Red/Amber/Blue)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=VT323&display=swap" rel="stylesheet">
+  <style>
+    :root{
+      --crt-green:#5fff85; --crt-dim:#2a4; --crt-red:#ff3b3b; --crt-amber:#ffbf3b; --crt-blue:#4fc3ff; --bg:#000;
+    }
+    html,body{margin:0;height:100%;background:var(--bg)}
+    body{color:var(--crt-green);font-family:'VT323',ui-monospace,monospace}
+    .crt{position:relative;min-height:100vh;display:grid;place-items:center;background:var(--bg);overflow:hidden}
+    .crt::before{content:"";position:absolute;inset:0;background:repeating-linear-gradient(to bottom,rgba(95,255,133,.06)0px,rgba(95,255,133,.06)2px,rgba(0,0,0,0)3px,rgba(0,0,0,0)4px);pointer-events:none;mix-blend-mode:screen;opacity:.45}
+    .crt::after{content:"";position:absolute;inset:0;background:radial-gradient(circle at 50% 50%,rgba(0,0,0,0)60%,rgba(0,0,0,.35)85%),linear-gradient(to bottom,rgba(255,255,255,.03),rgba(0,0,0,0)40%,rgba(255,255,255,.02)60%,rgba(0,0,0,.1));pointer-events:none;mix-blend-mode:multiply}
+    .flicker{animation:flicker 2.5s infinite steps(60);text-shadow:0 0 6px rgba(95,255,133,.6),0 0 24px rgba(95,255,133,.25)}
+    @keyframes flicker{0%,19%,21%,23%,80%,100%{opacity:1}20%,22%{opacity:.95}81%{opacity:.98}}
+    .wrap{width:100%;max-width:1400px;display:flex;gap:16px;align-items:flex-start;padding:14px}
+    .panel{flex:0 0 390px;border:1px solid var(--crt-dim);background:rgba(0,0,0,.75);padding:12px 16px}
+    .title{font-size:28px;margin-bottom:10px}
+    .row{font-size:22px;display:flex;gap:6px;margin:6px 0}
+    .label{opacity:.85;min-width:170px}
+    .value{font-weight:700}
+    ul.layers{list-style:none;padding:0;margin:8px 0 0 0}
+    ul.layers li{display:flex;justify-content:space-between;padding:3px 0;font-size:20px}
+    .viewport{width:703px;height:703px;border:1px solid var(--crt-dim);background:#000;box-shadow:0 0 20px rgba(95,255,133,.2) inset}
+    #errbar{position:fixed;top:0;left:0;right:0;background:#083;color:#caffda;padding:6px 10px;display:none;z-index:9999;border-bottom:1px solid var(--crt-dim);font-family:'VT323',ui-monospace,monospace}
+  </style>
+</head>
+<body>
+  <div id="errbar"></div>
+  <div id="root" class="crt"></div>
+
+  <script>
+    const errbar = document.getElementById('errbar');
+    window.addEventListener('error', e => { errbar.style.display='block'; errbar.textContent='Runtime error: '+(e.message||e.error); console.error(e.error||e.message,e); });
+    window.addEventListener('unhandledrejection', e => { errbar.style.display='block'; errbar.textContent='Unhandled promise rejection: '+(e.reason&&e.reason.message?e.reason.message:e.reason); console.error(e.reason); });
+  </script>
+
+  <script type="text/babel" data-presets="react">
+    const { useEffect, useMemo, useState } = React;
+
+    const WEBDIS_BASE = "http://192.168.30.114:7379";
+    const CORE_R    = 38;
+    const RED_ZONE_R= 63;
+    const STRATO_R  = 100;
+    const CLOUD_R   = 140;
+
+    const PHASE_KEYS = ["Phase1","Phase2","Phase3","Phase4"];
+    const PHASE_MAP  = { Phase1:490, Phase2:365, Phase3:244, Phase4:182 };
+
+    const isTruthy = v => v!=null && ["true","1","yes","on"].includes(String(v).trim().toLowerCase());
+
+    async function webdisMget(keys){
+      try{
+        const res=await fetch(`${WEBDIS_BASE}/MGET/${keys.map(encodeURIComponent).join("/")}.json`,{cache:"no-store"});
+        if(!res.ok) return [];
+        const data=await res.json(); const g=data?.MGET;
+        if(Array.isArray(g)&&g.length===keys.length) return g.map(v=>v==null?null:String(v));
+        if(Array.isArray(g)) return g.map(o=>(o&&typeof o==="object"&&"value" in o)?String(o.value):null);
+        return [];
+      }catch{return []}
+    }
+    async function webdisGet(key){
+      try{
+        const res=await fetch(`${WEBDIS_BASE}/GET/${encodeURIComponent(key)}.json`,{cache:"no-store"});
+        if(!res.ok) return null;
+        const data=await res.json(); const g=data?.GET;
+        if(Array.isArray(g)&&g.length) return String(g[0]);
+        if(g&&typeof g==="object"&&"value" in g) return String(g.value);
+      }catch{}
+      return null;
+    }
+
+    // Robust writer: try MSET, else fall back to 4x SET
+    async function writeLayerFlags(flags){
+      const parts=[];
+      for(const [k,v] of Object.entries(flags)){ parts.push(encodeURIComponent(k),encodeURIComponent(v)); }
+      let ok=false;
+      try{
+        const r=await fetch(`${WEBDIS_BASE}/MSET/${parts.join("/")}.json`,{cache:"no-store"});
+        ok=r.ok;
+      }catch{ ok=false; }
+      if(ok) return;
+
+      // fallback: 4 individual SETs
+      try{
+        await Promise.all(Object.entries(flags).map(([k,v]) =>
+          fetch(`${WEBDIS_BASE}/SET/${encodeURIComponent(k)}/${encodeURIComponent(v)}.json`,{cache:"no-store"})
+        ));
+      }catch(e){
+        // final fallback logged to console only (no UI noise)
+        console.warn("[webdis] layer flag write failed", e);
+      }
+    }
+
+    function atmosphericDensity(r){
+      const h=Math.max(0,r-CORE_R);
+      if(r> CLOUD_R) return 0.00005*Math.exp(-(h-(CLOUD_R-CORE_R))/70);
+      if(r> STRATO_R)return 0.0005 *Math.exp(-(h-(STRATO_R-CORE_R))/35);
+      if(r> RED_ZONE_R)return 0.002  *Math.exp(-(h-(RED_ZONE_R-CORE_R))/18);
+      const base=0.01*Math.exp(-h/7), spike=0.02*Math.exp(-h/3);
+      return base+spike;
+    }
+    const dragMultiplier = r => (r<=CORE_R+8?4.0 : r<=RED_ZONE_R?3.2 : r<=STRATO_R?1.6 : 1.0);
+
+    function stepOrbit(state,dt,velocityBoost){
+      const rho=atmosphericDensity(state.r);
+      const layerBoost=dragMultiplier(state.r);
+      const dragAccel=0.5*state.Cd*(state.A/state.m)*rho*state.v*state.v*velocityBoost*layerBoost;
+      const gravityAccel=state.mu/(state.r*state.r);
+      const inwardAccel=dragAccel+gravityAccel;
+      state.v+=(gravityAccel-dragAccel)*dt;
+      state.v=Math.max(0.1,Math.min(10,state.v));
+      state.r-=inwardAccel*dt*state.v*0.5;
+      if(state.r<CORE_R) state.r=CORE_R;
+      state.theta+=(state.v/state.r)*dt;
+      return state;
+    }
+
+    function App(){
+      const [orbit,setOrbit]=useState({r:145,v:1,theta:0,mu:1,Cd:2.2,A:1,m:1});
+      const [fallFactor,setFallFactor]=useState(PHASE_MAP.Phase4);
+
+      // Phase polling
+      useEffect(()=>{
+        let stop=false;
+        (async function poll(){
+          try{
+            let vals=await webdisMget(PHASE_KEYS);
+            if(!vals.length) vals=await Promise.all(PHASE_KEYS.map(k=>webdisGet(k)));
+            const active=PHASE_KEYS.filter((k,i)=>isTruthy(vals[i]));
+            const chosen=active.length?active.reduce((a,k)=>PHASE_MAP[k]>PHASE_MAP[a]?k:a,active[0]):"Phase4";
+            setFallFactor(PHASE_MAP[chosen]);
+          }catch{}
+          if(!stop) setTimeout(poll,1000);
+        })();
+        return ()=>{stop=true};
+      },[]);
+
+      // Single RAF integration loop (no stale state), plus EVERY-FRAME flag write
+      useEffect(()=>{
+        let raf,last;
+        async function frame(ts){
+          if(!last) last=ts;
+          let dt=(ts-last)/1000; last=ts;
+          if(dt>0.25) dt=0.25;
+
+          let nextStateRef=null;
+          setOrbit(prev=>{
+            const ns=stepOrbit({...prev,mu:fallFactor},dt,fallFactor);
+            nextStateRef=ns; return ns;
+          });
+
+          if(nextStateRef){
+            const r=nextStateRef.r;
+            // Write all four every frame; true inside/below boundary
+            writeLayerFlags({
+              CloudDeck:    r <= CLOUD_R    ? "true" : "false",
+              Stratosheath: r <= STRATO_R   ? "true" : "false",
+              RedZone:      r <= RED_ZONE_R ? "true" : "false",
+              Crushdepth:   r <= CORE_R     ? "true" : "false",
+            });
+          }
+          raf=requestAnimationFrame(frame);
+        }
+        raf=requestAnimationFrame(frame);
+        return ()=>cancelAnimationFrame(raf);
+      },[fallFactor]);
+
+      const shipBaseX=250, shipBaseY=100;
+      const layers=useMemo(()=>[
+        {name:"Cloud Deck",   key:"CloudDeck",    r:CLOUD_R,    color:"#5fff85"},
+        {name:"Stratosheath", key:"Stratosheath", r:STRATO_R,   color:"#3fff73"},
+        {name:"Red Zone",     key:"RedZone",      r:RED_ZONE_R, color:"var(--crt-red)"},
+      ],[]);
+      const boundaries=useMemo(()=>[...layers,{name:"Crushdepth",key:"Crushdepth",r:CORE_R}], [layers]);
+
+      const currentLayer=useMemo(()=>{
+        const f=layers.find(l=>orbit.r>l.r);
+        return f?f.name:layers[layers.length-1].name;
+      },[orbit.r,layers]);
+
+      // Spiral path preview from ship-origin
+      const fullPath=useMemo(()=>{
+        const pts=[];
+        const r0=orbit.r, th0=orbit.theta;
+        const shipPos={x:r0*Math.cos(th0), y:r0*Math.sin(th0)};
+        const T={x:-Math.sin(th0), y:Math.cos(th0)};
+        const In={x:-Math.cos(th0), y:-Math.sin(th0)};
+        let s={...orbit,mu:fallFactor};
+        let lastTheta=s.theta, rotations=0, steps=0;
+        const dtSmall=0.01;
+        while(s.r>CORE_R && rotations<6 && steps++<200000){
+          const dt=steps<50?dtSmall:0.03;
+          s=stepOrbit({...s},dt,fallFactor);
+          if(s.theta<lastTheta) rotations++;
+          lastTheta=s.theta;
+          const p={x:s.r*Math.cos(s.theta), y:s.r*Math.sin(s.theta)};
+          const rel={x:p.x-shipPos.x, y:p.y-shipPos.y};
+          const xh=rel.x*T.x+rel.y*T.y;
+          const yh=rel.x*In.x+rel.y*In.y;
+          const px=shipBaseX+xh, py=shipBaseY+yh;
+          pts.push(`${px},${py}`);
+        }
+        return pts.length?`M ${shipBaseX},${shipBaseY} L ${pts.join(" L ")}`:`M ${shipBaseX},${shipBaseY}`;
+      },[orbit,fallFactor]);
+
+      const layerETAs=useMemo(()=>boundaries.map(b=>{
+        if(orbit.r<=b.r) return {...b,status:"Threshold Reached",eta:null};
+        let s={...orbit,mu:fallFactor},t=0,dt=0.05,steps=0;
+        while(s.r>b.r && steps++<200000){ s=stepOrbit({...s},dt,fallFactor); t+=dt; if(s.r<=CORE_R)break; }
+        if(steps>=200000) return {...b,status:"—",eta:null};
+        return {...b,status:"ETA",eta:t};
+      }),[boundaries,orbit,fallFactor]);
+
+      const planetCY=shipBaseY+orbit.r;
+      const sceneScale="translate(250,250) scale(1.25) translate(-250,-250)";
+
+      return (
+        <div className="wrap">
+          <div className="panel flicker">
+            <div className="title">ORBITAL STATUS — LINK: ACTIVE</div>
+            <div className="row"><span className="label">Planet Name:</span><span className="value">Unknown</span></div>
+            <div className="row"><span className="label">Planet Type:</span><span className="value">Unexplored Gas Giant.</span></div>
+            <div className="row"><span className="label">Current Layer:</span><span className="value">{currentLayer}</span></div>
+            <div className="row" style={{marginTop:8}}><span className="label">Layer Crossings:</span></div>
+            <ul className="layers">
+              {layerETAs.map((b,idx)=>(
+                <li key={idx}>
+                  <span>{b.name}</span>
+                  {b.status==="Threshold Reached" ? <span>Threshold Reached</span>
+                    : b.status==="—" ? <span>—</span>
+                    : <span>ETA: {b.eta.toFixed(1)}s</span>}
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          <svg className="viewport" viewBox="0 0 500 500">
+            <g transform={sceneScale}>
+              <circle cx="250" cy={planetCY} r={CORE_R} fill="var(--crt-amber)"/>
+              {layers.map((l,i)=>(
+                <circle key={i} cx="250" cy={planetCY} r={l.r}
+                  fill="none" stroke={l.color} strokeWidth="2" strokeOpacity="0.35"/>
+              ))}
+              <path d={fullPath} fill="none" stroke="var(--crt-blue)" strokeWidth="1.5"
+                strokeDasharray="4,3" strokeOpacity="0.9"/>
+              <image href="ship.png" x="238" y="88" width="24" height="24"/>
+            </g>
+          </svg>
+        </div>
+      );
+    }
+
+    const root=ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
