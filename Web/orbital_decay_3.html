@@ -29,7 +29,7 @@
     @keyframes flicker{0%,19%,21%,23%,80%,100%{opacity:1;}20%,22%{opacity:.95;}81%{opacity:.98;}}
 
     .wrap{width:100%;max-width:1400px;display:flex;gap:16px;align-items:flex-start;padding:14px;}
-    .panel{flex:0 0 390px;border:1px solid var(--crt-dim);background:rgba(0,0,0,.75);padding:12px 16px;}
+    .panel{flex:0 0 300px;border:1px solid var(--crt-dim);background:rgba(0,0,0,.75);padding:12px 16px;}
     .title{font-size:28px;margin-bottom:10px;}
     .row{font-size:22px;display:flex;gap:6px;margin:6px 0;}
     .label{opacity:.85;min-width:170px;}
@@ -216,9 +216,9 @@
       return (
         <div className="wrap">
           <div className="panel flicker">
-            <div className="title">ORBITAL STATUS — LINK: ACTIVE</div>
+            <div className="title">ORBITAL STATUS</div>
             <div className="row"><span className="label">Planet Name:</span><span className="value">Unknown</span></div>
-            <div className="row"><span className="label">Planet Type:</span><span className="value">Unexplored Gas Giant.</span></div>
+            <div className="row"><span className="label">Planet Type:</span><span className="value">Gas Giant.</span></div>
             <div className="row"><span className="label">Current Layer:</span><span className="value">{currentLayer}</span></div>
             <div className="row" style={{marginTop:8}}><span className="label">Layer Crossings:</span></div>
             <ul className="layers">
